@@ -1,0 +1,1450 @@
+
+//ROS2 to Rebeca modelling
+
+//approximation threshold
+env double EPSILON = 0.01;
+env double INFINITY = 9999;
+env double PI = 3.14;
+env double DEG2RAD = 0.01745;
+env double RAD2DEG = 57.29578;
+env double SQRT2 = 1.4142;
+env double SIN45 = 0.7071;	//sqrt2/2
+env double COS45 = 0.7071;
+
+env int MAP_WIDTH=50;	//cols
+env int MAP_HEIGHT=50;	//rows
+env double MAP_RESOL=0.25500;	//cell size in reality in meters
+env double CELL_WIDTH = MAP_RESOL;
+env double CELL_DIAG = SQRT2*MAP_RESOL;
+env int XMAX = MAP_HEIGHT-1;
+env int YMAX = MAP_WIDTH-1;
+
+env double ROBOT_WIDTH = 0.4; //in meters
+env double ROBOT_LENGTH = 0.4;
+env double SAFE_MARGIN = 0.02;	
+env double STOP_ZONE = 0.3;
+env double COLLISION_RADIUS = 0.30;
+env double COLLISION_MARGIN = 0.02;	
+
+env double ROBOT_ANGULAR_VELOCITY = 360;//degrees per second
+env int ANGLE_INC = 2; //angle increment in degrees
+env int FIELD_OF_VIEW = 180;		//field of view (LIDAR sensor)
+env int LASERSCAN_RATE = 100;	//7Hz
+env double LASERSCAN_MAX_DISTANCE = 10.0;	//= max range in meters
+
+env boolean COMBINE_ZICZAC = true;
+
+env int BUFFER_SIZE = 101;	//generic bufffer size + 1 (counter)
+
+//directions, start from East = 0, moving counter-clockwise 45o each direction
+env int DIR_E 	= 0;
+env int DIR_NE 	= 1;
+env int DIR_N 	= 2;
+env int DIR_NW 	= 3;
+env int DIR_W 	= 4;
+env int DIR_SW 	= 5;
+env int DIR_S 	= 6;
+env int DIR_SE 	= 7;
+
+//action status codes
+env int ACTION_FREE 	= 0;
+env int ACTION_ONGOING 	= 1;
+env int ACTION_DONE 	= 2;
+env int ACTION_CANCELLED= 3;
+
+env int MAX_TOPIC_SUBSCRIBERS = 5;
+env int MAX_TOPIC_PUBLISHERS = 2;
+
+env int ACTION_FEEDBACK_RATE = 5000;
+
+env int WCET_SERVICE_DEFAULT = 50;
+
+env int MAX_ACTIONS = 2;	//buffer size
+env int WCET_ACTION_NAME = 30000;
+
+reactiveclass Node(50) {
+	knownrebecs {
+		MapServer theMap;
+	}
+	statevars{
+		byte rindex;	//numerical index of the robot, starting from 1
+		int targetX, targetY;
+		int rx, ry, rdir, velocity;
+		int distance2target;
+		int target_tolerance;
+		int[101] obstacles;	//nearest obstacles in 8 possible directions
+		int front_obstacle;
+		int[11] targets;
+		int[101/*BUFFER_SIZE*/] moves;	//movement commands to tell the robot to move in a path, element 0 = size	
+		int moveidx;	//current pointer in path
+		boolean isWaiting;
+		int waits;
+		int max_waiting_rounds;
+		int failures;
+		boolean scan_before_move;		
+		int default_velocity;
+		int default_time_cross;
+		int default_time_cross_diag;
+		int safe_front;
+		int safe_side;
+	}
+	
+	Node (byte idx, int x, int y, int tx, int ty, int tolerance, double real_velocity, int maxwait, boolean scanfirst){
+		assertion(idx>=1,"Node index must be from 1");
+		rindex = idx;
+		int[2] p1 = {x,y};
+		int[2] p2 = {tx,ty};	
+		//int[2] p1 = pixel2map(x,y);
+		//int[2] p2 = pixel2map(tx,ty);	
+		rx = p1[0]; ry = p1[1]; rdir = DIR_N; targetX = p2[0]; targetY = p2[1]; 
+		distance2target = (int)INFINITY;
+		target_tolerance = tolerance;
+		default_velocity = round(real_velocity / MAP_RESOL); //velocity as cells per second
+		default_time_cross = round(1000 * MAP_RESOL / real_velocity); //time in miliseconds to cross a cell horizontally or vertically
+		default_time_cross_diag = round(1000 * SQRT2 * MAP_RESOL / real_velocity); //time in miliseconds to cross a cell diagonally
+		velocity = 0;	
+		moves[0]=0;
+		for(int i=0;i<BUFFER_SIZE;i++) moves[i]=0;	//it is important to initialize all elements in an state variable array
+		moveidx=0;
+		waits=0; isWaiting=false;
+		failures = 0;
+		scan_before_move = scanfirst;
+		max_waiting_rounds = round((double)maxwait / LASERSCAN_RATE);		
+		safe_front = real2map(ROBOT_LENGTH/2.0 + STOP_ZONE);
+		safe_side = real2map(ROBOT_WIDTH/2.0 + SAFE_MARGIN);	
+		
+		for(int i=0;i<11;i++) targets[i]=0;
+		
+		for(int i=0;i<BUFFER_SIZE;i++) obstacles[i]=0;
+		front_obstacle = 0;
+		
+		setTarget(p2[0],p2[1]);
+	}
+	
+	int[2] pixel2map(int row,int col){
+		int x = MAP_WIDTH - col - 1;
+		int y = row;
+		int[2] p = {x,y};
+		return p;
+	}
+	
+	int[2] map2pixel(int x, int y){
+		int col= MAP_WIDTH - 1 - x;
+		int row = y;
+		int[2] p = {row,col};
+		return p;
+	}
+	
+	int real2map(double d){
+		return round(d / MAP_RESOL);
+	}
+	
+	void stop(boolean flushCmdPipe){
+		velocity = 0;
+		if (flushCmdPipe){
+			for(int i=0;i<BUFFER_SIZE;i++) moves[i]=0;
+			moveidx=0;
+			waits=0; isWaiting=false;
+		}
+	}
+	
+	void resume(){
+		if (moveidx < moves[0]){
+			velocity = default_velocity;
+			waits = 0; isWaiting = false;
+			if (!scan_before_move) updateMovingStatus(true);
+		}
+	}
+	
+	int xy2idx(int ox,int oy){
+		int x,sx,y,sy;	
+		if (ox<0){
+			sx=2;x=-ox;
+		}else{
+			sx=1;x=ox;		
+		}
+		if (oy<0){
+			sy=2;y=-oy;
+		}else{
+			sy=1;y=oy;		
+		}
+		int ex = sx*1000 + x;
+		int ey = sy*1000 + y;
+		int idx = ey*10000 + ex;
+		return idx;
+	}
+	
+	//decode
+	int[2] idx2xy(int idx){
+		int ex = idx % 10000;
+		int ey = (idx - ex) / 10000;
+		int sx = (int)(ex/1000);
+		int x = ex % 1000;
+		int sy = (int)(ey/1000);
+		int y = ey % 1000;
+		if (sx==2) x=-x;
+		if (sy==2) y=-y;
+		int[2] ret;ret[0]=x;ret[1]=y;
+		return ret;
+	}	
+	
+	int cmp(double a,double b){
+		return a>b?1:(a<b?-1:0);
+	}
+	
+	//1.1 -> 2, -1.1 -> -2
+	int round(double x){
+		double dec = x/10;
+		if (dec!=0) dec = dec>0?1:-1;
+		return (int)x + dec;
+	}
+	
+	int getTimeToStop(double v, double a){
+		// a = delta v / delta t
+		return a==0 ? 0 : round(v/a);
+	}
+	
+	double getDistanceToStop(double v, double a){
+		//v^2 - vo^2 = 2as
+		return v==0 ? 0: 2*a / (v*v);
+	}
+	
+	void setTarget(int x, int y){
+		stop(true);
+		int safe_margin = real2map(SAFE_MARGIN);
+		int xmin = safe_margin;
+		int xmax = XMAX - safe_margin;
+		int ymin = safe_margin;
+		int ymax = YMAX - safe_margin;
+		if (x<xmin) x = xmin;
+		if (x>xmax) x = xmax;
+		if (y<ymin) y = ymin;
+		if (y>ymax) y = ymax;
+		int code = xy2idx(x,y);
+		//if target is not already in queue
+		if (targets[targets[0]]!=code){
+			targets[0]++;
+			targets[targets[0]] = code;
+		}
+		theMap.generatePath(self,rindex,rx,ry,x,y);
+	}	
+
+	int getNextDir(){
+		if (moveidx>=moves[0]) return rdir;
+		int[2] nxt = idx2xy(moves[moveidx+1]);
+		int dx = nxt[0] - rx;
+		int dy = nxt[1] - ry;
+		int dir=0;
+		if (dx==0) dir = dy>0?2:6;
+		else if (dy==0) dir = dx>0?0:4;
+		else if (dx*dy>0) dir = dx>0?1:5;
+		else dir = dx<0?3:7;
+		return dir;
+		//return moves[moveidx+1];
+	}
+	
+	int getTargetDir(){
+		int dx = cmp(targetX,rx);
+		int dy = cmp(targetY,ry);
+		int dir;
+		if (dx==0) dir = dy>0?2:6;
+		else if (dy==0) dir = dx>0?0:4;
+		else if (dx*dy>0) dir = dx>0?1:5;
+		else dir = dx<0?3:7;
+		return dir;
+	}
+		
+	int[2] getCellAtDir(int x, int y, int dir,int steps){
+		//neighboring cells in 8 directions: e, ne, n, nw, w, sw, s, se
+		int[8][2] nxt = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+		dir%=8;
+		if (dir<0)dir+=8;
+		int[2] p ;
+		p[0] = x + steps*nxt[dir][0];
+		p[1] = y + steps*nxt[dir][1];
+		return p;	
+	}
+	
+	int[8][2] getNeighbors(int x, int y){
+		//neighboring cells in 8 directions: e, ne, n, nw, w, sw, s, se
+		int[8][2] nxt = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+		int[8][2] p ;
+		for(int i=0;i<8;i++){
+			p[i][0] = x + nxt[i][0];
+			p[i][1] = y + nxt[i][1];
+		}
+		return p;	
+	}
+	
+	//move the robot N steps in the current direction, minus means moving back
+	//stop = true, means the robot should stop after moving
+	//@priority(2)
+	boolean move(int dir,int steps,boolean stop){
+		int[8][2] offsets = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+		int dx = offsets[dir][0] * steps;
+		int dy = offsets[dir][1] * steps;
+		int x = rx + dx;
+		int y = ry + dy;
+		boolean moved = false;
+		if (isInside(x,y)){
+			rdir=dir;rx=x;ry=y; 
+			moved=true;		
+			theMap.updateRobotLocation(rindex,rx,ry,rdir,velocity);
+			distance2target = round( odistance(rx,ry,targetX,targetY) );
+			if (stop) stop(false);
+		}
+		return moved;
+	}
+	
+	//rotate the robot N steps (1 step = 45 degrees), positive = counter-clockwise, negative = clockwise
+	void rotate(int steps){
+		rdir += steps;
+		rdir %= 8;
+		while (rdir<0) rdir+=8;
+	}
+	
+	void rotate180(){
+		rotate(4);
+	}
+	
+	void rotateLeft(){
+		rotate(1);
+	}
+	
+	void rotateRight(){
+		rotate(-1);
+	}
+	
+	double abs(double x){
+		return x>=0?x:-x;
+	}
+	
+		//Euclide distance
+	double edistance(double x1, double y1, double x2, double y2){
+		return sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+	}
+	
+	//Manhattan distance
+	double mdistance(double x1, double y1, double x2, double y2){
+		return abs(x2-x1) + abs(y2-y1);
+	}
+	
+	//Octile distance
+	double odistance(double x1, double y1, double x2, double y2){
+		double dx = abs(x2-x1);
+		double dy = abs(y2-y1);
+		double f = SQRT2 - 1;
+		return (dx < dy) ? f * dx + dy : f * dy + dx;	
+	}
+	
+	double cdistance(double x1, double y1, double x2, double y2){
+		double dx = abs(x2-x1);
+		double dy = abs(y2-y1);
+		return dx>dy?dx:dy;
+	}
+	
+	int normalizeDir(int dir){
+		dir%=8;
+		if (dir<0) dir+=8;
+		return dir;
+	}
+	
+	boolean isInside(int x, int y){
+		return x>=0 && x<=XMAX && y>=0 && y<=YMAX;
+	}
+
+	//scandata = array of (x,y) of obstacles relative to the robot
+	//angles = array of laser ray angle index (*ANGLE_INC to get the angle value, relative to the robot's movement axis) 
+	@priority(3)
+	msgsrv onLaserScan(int[101] scandata, int[101] angles){
+		//update obstacles in range	
+		for(int i=0;i<BUFFER_SIZE;i++) obstacles[i]=scandata[i];
+		
+		front_obstacle = (int)(getObstacleAtDir(rdir,true));
+				
+		//only update moving status when not reached target yet
+		if (isWaiting || (scan_before_move && distance2target > target_tolerance))
+			updateMovingStatus(!scan_before_move);	
+	}
+	
+	/*
+	shifting: 
+		x' = x-a 
+		y' = y-b
+	rotating:
+		x' = x*cos(theta) + y*sin(theta);
+		y' = x*-sin(theta) + y*cos(theta);
+	*/
+	int[2] getNewCoord(int x, int y, int a, int b, int dir){
+		dir = dir % 8;
+		if (dir<0) dir+=8;
+		
+		//theta = 0,45,90,135,180,235,270,360
+		//cos = x, sin = y, tan = y/x
+		
+		//use ENV for these constant arrays will cause the model not compilable, don't know the reason
+		double[8] sins = {0.,SIN45,1.,SIN45,0.,-SIN45,-1.,-SIN45};
+		double[8] coss = {1.,COS45,0.,-COS45,-1.,-COS45,0.,COS45};		
+
+		int[2] p;
+		x-=a; y-=b;
+		p[0] = round(x*coss[dir] + y*sins[dir]);
+		p[1] = round(-x*sins[dir] + y*coss[dir]);
+		
+		return p;
+	}	
+	
+	//heuristic to estimate distance to nearest blocking obstacle in a direction
+	double getObstacleAtDir(int dir, boolean stepwise){
+		double nearest = INFINITY;
+		double steplen = dir %2 > 0? CELL_DIAG:CELL_WIDTH;
+		//int ymax = round(ROBOT_WIDTH/2 + SAFE_MARGIN);
+		//int ymin = 1;
+		double ymax = ROBOT_WIDTH/2 + SAFE_MARGIN;
+		double ymin = steplen/2 + SAFE_MARGIN;
+		if (ymax<ymin) ymax=ymin;
+		double offset = 0.5;
+		double a = (rx + offset) * MAP_RESOL;
+		double b = (ry + offset) * MAP_RESOL;
+		int mini=0;
+		for(int i=1;i<=obstacles[0];i++){
+			int[2] o = idx2xy(obstacles[i]);
+			double[2] p = map2robot((o[0]+offset)*MAP_RESOL,(o[1]+offset)*MAP_RESOL,a,b,dir);
+			//int y = round(p[1]);
+			if (p[0]>0 && p[1]<=ymax && p[1]>=-ymax){
+				if (p[0]<nearest) nearest = p[0];
+			}		
+		}
+		/*
+		if (nearest < INFINITY){
+			nearest -= steplen;
+		}
+		*/		
+		if (stepwise) nearest = nearest < INFINITY ? (int)(nearest / steplen) : INFINITY;
+		return nearest;
+	}
+
+	double[2] grid2map(int x,int y){
+		double[2] p;
+		p[0] = (x+0.5) * MAP_RESOL;
+		p[1] = (y+0.5) * MAP_RESOL;
+		return p;
+	}
+	
+	double[2] map2robot(double x, double y, double a, double b, int dir){
+		dir = dir % 8;
+		if (dir<0) dir+=8;
+			
+		//use ENV for these constant arrays will cause the model not compilable, don't know the reason
+		double[8] sins = {0.,SIN45,1.,SIN45,0.,-SIN45,-1.,-SIN45};
+		double[8] coss = {1.,COS45,0.,-COS45,-1.,-COS45,0.,COS45};		
+
+		double[2] p;
+		x-=a; y-=b;
+		p[0] = (x*coss[dir] + y*sins[dir]);
+		p[1] = (-x*sins[dir] + y*coss[dir]);
+		
+		return p;
+	}	
+	
+	//get the direction with farthest obstacle (depends on what the robot sees from laser scan)
+	//return {direction, distance}
+	int[2] getDirWithoutObstacle(int random,int mind){
+		int maxdir = rdir;
+		int maxd = 0;
+		/*
+		int[8] dirs;
+		for(int dir=0;dir<8;dir++){
+			dirs[dir]=0;
+		}
+		int[3] backdirs = {normalizeDir(rdir+4),normalizeDir(rdir+3),normalizeDir(rdir+5)};
+		for(int i=0;i<3;i++){
+			int dir = backdirs[i];
+			int d = (int)(getObstacleAtDir(dir,true));	
+			if (d > maxd){
+				maxdir = dir;
+				maxd = d;
+			}
+			dirs[dir] = xy2idx(dir,d);
+		}
+		*/		
+		int[8] dirs;
+		for(int dir=0;dir<8;dir++){
+			dirs[dir]=0;
+			int d = (int)(getObstacleAtDir(dir,true));	
+			if (d > maxd){
+				maxdir = dir;
+				maxd = d;
+			}
+			dirs[dir] = xy2idx(dir,d);
+			//if (d>mind) {dirs[dir] = d;}
+		}
+		dirs = sort8(dirs,false);
+		int[2] p = idx2xy(dirs[random]);//0=dir,1=distance
+		//int[2] p; p[0] = maxdir; p[1] = maxd;
+		return p;
+	}
+	
+	// Function for Selection sort
+	int[8] sort8(int[8] arr, boolean asc)
+	{
+		int n=8;
+	    int i, j, min_idx, t, dir, d; 
+	    for (i = 0; i < n; i++) {
+	        min_idx = i;
+	        for (j = i + 1; j < n; j++) {
+	        	int[2]p1 = idx2xy(arr[j]);
+	        	int[2]p2 = idx2xy(arr[min_idx]);
+	 			boolean cmp = asc ? p1[1]<p2[1] : p1[1]>p2[1];
+	            if (cmp) min_idx = j;
+	        }
+	 
+	        if (min_idx != i){
+	        	t = arr[min_idx];
+	        	arr[min_idx] = arr[i];
+	        	arr[i] = t;
+	            //swap(arr[min_idx], arr[i]);
+	        }
+	    }
+	    return arr;
+	}
+	
+	@priority(1)
+	msgsrv updateMovingStatus(boolean moveNext){
+		
+		//all moves have been queued
+		if ( moveidx >= moves[0]){
+			stop(false);
+			boolean reached = false;
+			if (targets[0]>1)
+				reached = xy2idx(rx,ry) == targets[targets[0]];
+			else
+				reached = distance2target<=target_tolerance;
+				
+			if (reached && targets[0]>0){
+				targets[targets[0]]=0;
+				targets[0]--;					
+			}
+			if (targets[0]>0){
+				stop(true);
+				int[2]t = idx2xy(targets[targets[0]]);
+				theMap.generatePath(self,rindex,rx,ry,t[0],t[1]);
+			}
+		} else {
+			int ndir = getNextDir();
+			int time_to_rotate = 0;
+			if (rdir!=ndir){
+				velocity = 0;
+				int delta = ndir - rdir;
+				if (delta<0) delta = -delta;
+				time_to_rotate = round(1000.0*45*delta / ROBOT_ANGULAR_VELOCITY);
+				rdir = ndir; //rotate the robot to the next direction		
+				theMap.updateRobotLocation(rindex,rx,ry,rdir,velocity);
+			} 			
+			if (time_to_rotate>0){
+				updateMovingStatus(moveNext) after(time_to_rotate);
+			} else {
+				boolean diag = rdir % 2 >0;
+				double steplen = diag ? CELL_DIAG : CELL_WIDTH;
+				int stepwait = diag ? default_time_cross_diag : default_time_cross;
+				double distance = getObstacleAtDir(rdir,false);
+				front_obstacle = distance==INFINITY?(int)INFINITY:(int)(distance / steplen);
+				double expected_distance = steplen + ROBOT_LENGTH/2 + STOP_ZONE;
+				if (distance > expected_distance){
+					if (velocity <= 0 ) velocity = default_velocity;
+					move(rdir,1,moveidx==moves[0]);	//always just move 1 step
+					if (xy2idx(rx,ry) == moves[moveidx+1]) moveidx++;
+					waits = 0; isWaiting = false;
+					if (moveNext) updateMovingStatus(moveNext) after(stepwait);
+				} else {
+					//cannot move, stop if is moving, wait for obstacles to go away
+					stop(false);
+					isWaiting = true;
+					waits++;
+					//replan path if it has been waiting long enough
+					if (waits>0 && (waits % max_waiting_rounds == 0)){
+						failures++;
+						int odir = rdir;
+						//int redir = (rdir+4) % 8;
+						//int maxback = (int)getObstacleAtDir(redir,true);
+						int[2] od = getDirWithoutObstacle(?(0,1,2,3),5); int redir = od[0]; int maxback = od[1];				
+						int backsteps = ?(4,6,8,10,12);
+						while (backsteps > maxback) backsteps--;
+						int[2] backpoint = getCellAtDir(rx,ry,redir,backsteps);
+						setTarget(backpoint[0],backpoint[1]);
+					} else {
+						//continue waiting
+						//updateMovingStatus(moveNext) after(LASERSCAN_RATE);
+					}
+				}
+			}
+		}
+	}	
+	
+	@priority(10)
+	msgsrv onNewPath(int[101/*BUFFER_SIZE*/] path){
+		stop(true);
+		if (path[0]>0){
+			if (failures>0) failures--;
+			for(int i=0;i<BUFFER_SIZE;i++) moves[i] = path[i];
+			/*
+			int[2] current;
+			int[2] nxt;
+			current = idx2xy(path[1]);
+			moves[0]=0;
+			moveidx=0;
+			for(int i=2;i<=path[0];i++){
+				nxt = idx2xy(path[i]);
+				int dx = nxt[0] - current[0];
+				int dy = nxt[1] - current[1];
+				int dir=0;
+				if (dx==0) dir = dy>0?2:6;
+				else if (dy==0) dir = dx>0?0:4;
+				else if (dx*dy>0) dir = dx>0?1:5;
+				else dir = dx<0?3:7;
+				moves[0]++;
+				moves[moves[0]] = dir;
+				current[0] = nxt[0];
+				current[1] = nxt[1];
+			}
+			*/
+			//start moving
+			//rdir = getNextDir();
+			velocity = default_velocity;
+			if (!scan_before_move) updateMovingStatus(!scan_before_move);
+		} else {
+			//path not found, what to do next???
+			failures++;
+			if (failures>2){
+				assertion(false,"the robot seems to get stuck");
+			} else {
+				int odir = rdir;
+				//int redir = (rdir+4) % 8;
+				//int maxback = (int)getObstacleAtDir(redir,true);
+				int[2] od = getDirWithoutObstacle(?(0,1,2,3),5); int redir = od[0]; int maxback = od[1];				
+				int backsteps = ?(4,6,8,10,12);
+				while (backsteps > maxback) backsteps--;
+				int[2] backpoint = getCellAtDir(rx,ry,redir,backsteps);
+				setTarget(backpoint[0],backpoint[1]);
+			}
+		}
+	}
+		
+	msgsrv onTopicMessage(int topicName, int[10] topicMessage){
+		
+	}
+
+	msgsrv onServiceRequest(int serviceName, byte[255] serviceParams){		
+		delay(WCET_SERVICE_DEFAULT);
+		((Node)sender).onServiceDone(serviceName,1);
+	}
+	
+	msgsrv onServiceDone(int serviceName,int serviceResult){
+	}
+	
+}
+
+reactiveclass Topic(20) {
+	statevars{
+		int topicName;
+		Node[5] subscribers;
+		int countSubscribers;
+	}
+	
+	Topic(int t){
+		topicName = t;
+		countSubscribers=0;
+	}
+	
+	msgsrv subscribe(){
+		if (countSubscribers<5){
+			subscribers[countSubscribers]=(Node)sender;
+			countSubscribers++;		
+		}
+	}
+	
+	msgsrv unsubscribe(){
+		Node n = (Node)sender;
+		for(int i=0;i<countSubscribers;i++){
+			if (subscribers[i] == n) {subscribers[i]=null;break;}
+		}
+	}
+	
+	msgsrv send(int[10] topicMessage){
+		for(int i=0;i<countSubscribers;i++){
+			if (subscribers[i]!=null)
+				subscribers[i].onTopicMessage(topicName,topicMessage);
+		}
+	}
+	
+	msgsrv perodic_send(int rate){
+		int[10] topicMessage;
+		send(topicMessage);	
+		perodic_send(rate) after(rate);
+	}
+}
+
+reactiveclass MapServer(50) {
+	knownrebecs{
+		Node r1;
+		Node r2;
+		Node r3;
+		Node r4;
+		Node r5;		
+	}
+	statevars{
+		int[21] rloc; //#0 = counter, [1,2,3,4] = [x,y,dir,isMoving] of each robot
+	}
+		
+	MapServer(int rcount){
+		int max = 5;//(int)((BUFFER_SIZE-1)/4);
+		assertion(rcount>=1 && rcount<=max,"Number of robots is out of range");
+		rloc[0] = rcount;
+		for(int i=0;i<max;i++) {
+			rloc[4*i+1]=-1;
+			rloc[4*i+2]=-1;
+			rloc[4*i+3]=0;
+			rloc[4*i+4]=0;
+		}
+		int max_range = round(LASERSCAN_MAX_DISTANCE / MAP_RESOL);
+		scanObstacles(r1,1,LASERSCAN_RATE,FIELD_OF_VIEW,max_range);
+		scanObstacles(r2,2,LASERSCAN_RATE,FIELD_OF_VIEW,max_range);
+		scanObstacles(r3,3,LASERSCAN_RATE,FIELD_OF_VIEW,max_range);
+		scanObstacles(r4,4,LASERSCAN_RATE,FIELD_OF_VIEW,max_range);
+		scanObstacles(r5,5,LASERSCAN_RATE,FIELD_OF_VIEW,max_range);
+	}
+	
+	int[4] getRobotInfo(int index){
+		int i = 4*(index-1);
+		int[4] ri = {rloc[i+1],rloc[i+2],rloc[i+3],rloc[i+4]};
+		return ri;
+	}
+	
+	//helper math functions	
+	double pow(double base, int n){
+		double x = 1; 
+		for(int i=0;i<n;i++) x*=base;
+		return x;
+	}
+	
+	double abs(double x){
+		return x>=0?x:-x;
+	}
+	
+	int sign(double x){
+		return x>0?1:(x<0?-1:0);
+	}
+	
+	double min(double a, double b){
+		return a<b?a:b;
+	}
+	
+	double max(double a, double b){
+		return a>b?a:b;
+	}
+	
+	//1.1 -> 2, -1.1 -> -2
+	int round(double x){
+		double dec = x/10;
+		if (dec!=0) dec = dec>0?1:-1;
+		return (int)x + dec;
+	}
+	
+	int floor(double x){
+		return (int)x;
+	}
+	
+	boolean between(double x, double x1, double x2){
+		return ( sign(x-x1)*sign(x-x2) )<=0;
+	}
+	
+	boolean isInside(int x, int y){
+		return x>=0 && x<=XMAX && y>=0 && y<=YMAX;
+	}		
+	
+	double deg2rad(double a){
+		return a * PI / 180;
+	}
+	
+	double rad2deg(double a){
+		return a * 180 / PI;
+	}
+	
+	int getAngleIndex(double a){
+		int i = round(a/ANGLE_INC);
+		return i;
+	}
+	
+	double sqrt(double number) {
+	    double start = 0;
+	    double end = number;
+	    double mid = (start + end) / 2;
+	    while (end - start > EPSILON) {
+	        if (mid * mid > number) {
+	            end = mid;
+	        } else {
+	            start = mid;
+	        }
+	        mid = (start + end) / 2;
+	    }	
+	    return mid;
+	}	
+	
+	//Euclide distance
+	double edistance(double x1, double y1, double x2, double y2){
+		return sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+	}
+	
+	//Manhattan distance
+	double mdistance(double x1, double y1, double x2, double y2){
+		return abs(x2-x1) + abs(y2-y1);
+	}
+	
+	//Octile distance
+	double odistance(double x1, double y1, double x2, double y2){
+		double dx = abs(x2-x1);
+		double dy = abs(y2-y1);
+		double f = SQRT2 - 1;
+		return (dx < dy) ? f * dx + dy : f * dy + dx;	
+	}
+	
+	double cdistance(double x1, double y1, double x2, double y2){
+		double dx = abs(x2-x1);
+		double dy = abs(y2-y1);
+		return dx>dy?dx:dy;
+	}
+	
+	int getAngleFromDir(int dir){
+		dir %= 8;
+		if (dir<0) dir+=8;
+		return 45*dir;
+	}
+	
+	//pre-calculate trigonometric values of all possible integer angles from 0 to 360
+	double[4] getAngleCalc(int i){
+
+double[1444] a;
+a[0]=0.0;a[1]=1.0000;a[2]=0.0000;a[3]=0.0000;a[4]=1.0;a[5]=0.9998;a[6]=0.0175;a[7]=0.0175;a[8]=2.0;a[9]=0.9994;a[10]=0.0349;a[11]=0.0349;a[12]=3.0;a[13]=0.9986;a[14]=0.0523;a[15]=0.0524;a[16]=4.0;a[17]=0.9976;a[18]=0.0698;a[19]=0.0699;a[20]=5.0;a[21]=0.9962;a[22]=0.0872;a[23]=0.0875;a[24]=6.0;a[25]=0.9945;a[26]=0.1045;a[27]=0.1051;a[28]=7.0;a[29]=0.9925;a[30]=0.1219;a[31]=0.1228;a[32]=8.0;a[33]=0.9903;a[34]=0.1392;a[35]=0.1405;a[36]=9.0;a[37]=0.9877;a[38]=0.1564;a[39]=0.1584;a[40]=10.0;a[41]=0.9848;a[42]=0.1736;a[43]=0.1763;a[44]=11.0;a[45]=0.9816;a[46]=0.1908;a[47]=0.1944;a[48]=12.0;a[49]=0.9781;a[50]=0.2079;a[51]=0.2126;a[52]=13.0;a[53]=0.9744;a[54]=0.2250;a[55]=0.2309;a[56]=14.0;a[57]=0.9703;a[58]=0.2419;a[59]=0.2493;a[60]=15.0;a[61]=0.9659;a[62]=0.2588;a[63]=0.2679;a[64]=16.0;a[65]=0.9613;a[66]=0.2756;a[67]=0.2867;a[68]=17.0;a[69]=0.9563;a[70]=0.2924;a[71]=0.3057;a[72]=18.0;a[73]=0.9511;a[74]=0.3090;a[75]=0.3249;a[76]=19.0;a[77]=0.9455;a[78]=0.3256;a[79]=0.3443;a[80]=20.0;a[81]=0.9397;a[82]=0.3420;a[83]=0.3640;a[84]=21.0;a[85]=0.9336;a[86]=0.3584;a[87]=0.3839;a[88]=22.0;a[89]=0.9272;a[90]=0.3746;a[91]=0.4040;a[92]=23.0;a[93]=0.9205;a[94]=0.3907;a[95]=0.4245;a[96]=24.0;a[97]=0.9135;a[98]=0.4067;a[99]=0.4452;a[100]=25.0;a[101]=0.9063;a[102]=0.4226;a[103]=0.4663;a[104]=26.0;a[105]=0.8988;a[106]=0.4384;a[107]=0.4877;a[108]=27.0;a[109]=0.8910;a[110]=0.4540;a[111]=0.5095;a[112]=28.0;a[113]=0.8829;a[114]=0.4695;a[115]=0.5317;a[116]=29.0;a[117]=0.8746;a[118]=0.4848;a[119]=0.5543;a[120]=30.0;a[121]=0.8660;a[122]=0.5000;a[123]=0.5774;a[124]=31.0;a[125]=0.8572;a[126]=0.5150;a[127]=0.6009;a[128]=32.0;a[129]=0.8480;a[130]=0.5299;a[131]=0.6249;a[132]=33.0;a[133]=0.8387;a[134]=0.5446;a[135]=0.6494;a[136]=34.0;a[137]=0.8290;a[138]=0.5592;a[139]=0.6745;a[140]=35.0;a[141]=0.8192;a[142]=0.5736;a[143]=0.7002;a[144]=36.0;a[145]=0.8090;a[146]=0.5878;a[147]=0.7265;a[148]=37.0;a[149]=0.7986;a[150]=0.6018;a[151]=0.7536;a[152]=38.0;a[153]=0.7880;a[154]=0.6157;a[155]=0.7813;a[156]=39.0;a[157]=0.7771;a[158]=0.6293;a[159]=0.8098;a[160]=40.0;a[161]=0.7660;a[162]=0.6428;a[163]=0.8391;a[164]=41.0;a[165]=0.7547;a[166]=0.6561;a[167]=0.8693;a[168]=42.0;a[169]=0.7431;a[170]=0.6691;a[171]=0.9004;a[172]=43.0;a[173]=0.7314;a[174]=0.6820;a[175]=0.9325;a[176]=44.0;a[177]=0.7193;a[178]=0.6947;a[179]=0.9657;a[180]=45.0;a[181]=0.7071;a[182]=0.7071;a[183]=1.0000;a[184]=46.0;a[185]=0.6947;a[186]=0.7193;a[187]=1.0355;a[188]=47.0;a[189]=0.6820;a[190]=0.7314;a[191]=1.0724;a[192]=48.0;a[193]=0.6691;a[194]=0.7431;a[195]=1.1106;a[196]=49.0;a[197]=0.6561;a[198]=0.7547;a[199]=1.1504;a[200]=50.0;a[201]=0.6428;a[202]=0.7660;a[203]=1.1918;a[204]=51.0;a[205]=0.6293;a[206]=0.7771;a[207]=1.2349;a[208]=52.0;a[209]=0.6157;a[210]=0.7880;a[211]=1.2799;a[212]=53.0;a[213]=0.6018;a[214]=0.7986;a[215]=1.3270;a[216]=54.0;a[217]=0.5878;a[218]=0.8090;a[219]=1.3764;a[220]=55.0;a[221]=0.5736;a[222]=0.8192;a[223]=1.4281;a[224]=56.0;a[225]=0.5592;a[226]=0.8290;a[227]=1.4826;a[228]=57.0;a[229]=0.5446;a[230]=0.8387;a[231]=1.5399;a[232]=58.0;a[233]=0.5299;a[234]=0.8480;a[235]=1.6003;a[236]=59.0;a[237]=0.5150;a[238]=0.8572;a[239]=1.6643;a[240]=60.0;a[241]=0.5000;a[242]=0.8660;a[243]=1.7321;a[244]=61.0;a[245]=0.4848;a[246]=0.8746;a[247]=1.8040;a[248]=62.0;a[249]=0.4695;a[250]=0.8829;a[251]=1.8807;a[252]=63.0;a[253]=0.4540;a[254]=0.8910;a[255]=1.9626;a[256]=64.0;a[257]=0.4384;a[258]=0.8988;a[259]=2.0503;a[260]=65.0;a[261]=0.4226;a[262]=0.9063;a[263]=2.1445;a[264]=66.0;a[265]=0.4067;a[266]=0.9135;a[267]=2.2460;a[268]=67.0;a[269]=0.3907;a[270]=0.9205;a[271]=2.3559;a[272]=68.0;a[273]=0.3746;a[274]=0.9272;a[275]=2.4751;a[276]=69.0;a[277]=0.3584;a[278]=0.9336;a[279]=2.6051;a[280]=70.0;a[281]=0.3420;a[282]=0.9397;a[283]=2.7475;a[284]=71.0;a[285]=0.3256;a[286]=0.9455;a[287]=2.9042;a[288]=72.0;a[289]=0.3090;a[290]=0.9511;a[291]=3.0777;a[292]=73.0;a[293]=0.2924;a[294]=0.9563;a[295]=3.2709;a[296]=74.0;a[297]=0.2756;a[298]=0.9613;a[299]=3.4874;a[300]=75.0;a[301]=0.2588;a[302]=0.9659;a[303]=3.7321;a[304]=76.0;a[305]=0.2419;a[306]=0.9703;a[307]=4.0108;a[308]=77.0;a[309]=0.2250;a[310]=0.9744;a[311]=4.3315;a[312]=78.0;a[313]=0.2079;a[314]=0.9781;a[315]=4.7046;a[316]=79.0;a[317]=0.1908;a[318]=0.9816;a[319]=5.1446;a[320]=80.0;a[321]=0.1736;a[322]=0.9848;a[323]=5.6713;a[324]=81.0;a[325]=0.1564;a[326]=0.9877;a[327]=6.3138;a[328]=82.0;a[329]=0.1392;a[330]=0.9903;a[331]=7.1154;a[332]=83.0;a[333]=0.1219;a[334]=0.9925;a[335]=8.1443;a[336]=84.0;a[337]=0.1045;a[338]=0.9945;a[339]=9.5144;a[340]=85.0;a[341]=0.0872;a[342]=0.9962;a[343]=11.4301;a[344]=86.0;a[345]=0.0698;a[346]=0.9976;a[347]=14.3007;a[348]=87.0;a[349]=0.0523;a[350]=0.9986;a[351]=19.0811;a[352]=88.0;a[353]=0.0349;a[354]=0.9994;a[355]=28.6363;a[356]=89.0;a[357]=0.0175;a[358]=0.9998;a[359]=57.2900;a[360]=90.0;a[361]=0.0000;a[362]=1.0000;a[363]=16331239353195370.0000;a[364]=91.0;a[365]=-0.0175;a[366]=0.9998;a[367]=-57.2900;a[368]=92.0;a[369]=-0.0349;a[370]=0.9994;a[371]=-28.6363;a[372]=93.0;a[373]=-0.0523;a[374]=0.9986;a[375]=-19.0811;a[376]=94.0;a[377]=-0.0698;a[378]=0.9976;a[379]=-14.3007;a[380]=95.0;a[381]=-0.0872;a[382]=0.9962;a[383]=-11.4301;a[384]=96.0;a[385]=-0.1045;a[386]=0.9945;a[387]=-9.5144;a[388]=97.0;a[389]=-0.1219;a[390]=0.9925;a[391]=-8.1443;a[392]=98.0;a[393]=-0.1392;a[394]=0.9903;a[395]=-7.1154;a[396]=99.0;a[397]=-0.1564;a[398]=0.9877;a[399]=-6.3138;a[400]=100.0;a[401]=-0.1736;a[402]=0.9848;a[403]=-5.6713;
+a[404]=101.0;a[405]=-0.1908;a[406]=0.9816;a[407]=-5.1446;a[408]=102.0;a[409]=-0.2079;a[410]=0.9781;a[411]=-4.7046;a[412]=103.0;a[413]=-0.2250;a[414]=0.9744;a[415]=-4.3315;a[416]=104.0;a[417]=-0.2419;a[418]=0.9703;a[419]=-4.0108;a[420]=105.0;a[421]=-0.2588;a[422]=0.9659;a[423]=-3.7321;a[424]=106.0;a[425]=-0.2756;a[426]=0.9613;a[427]=-3.4874;a[428]=107.0;a[429]=-0.2924;a[430]=0.9563;a[431]=-3.2709;a[432]=108.0;a[433]=-0.3090;a[434]=0.9511;a[435]=-3.0777;a[436]=109.0;a[437]=-0.3256;a[438]=0.9455;a[439]=-2.9042;a[440]=110.0;a[441]=-0.3420;a[442]=0.9397;a[443]=-2.7475;a[444]=111.0;a[445]=-0.3584;a[446]=0.9336;a[447]=-2.6051;a[448]=112.0;a[449]=-0.3746;a[450]=0.9272;a[451]=-2.4751;a[452]=113.0;a[453]=-0.3907;a[454]=0.9205;a[455]=-2.3559;a[456]=114.0;a[457]=-0.4067;a[458]=0.9135;a[459]=-2.2460;a[460]=115.0;a[461]=-0.4226;a[462]=0.9063;a[463]=-2.1445;a[464]=116.0;a[465]=-0.4384;a[466]=0.8988;a[467]=-2.0503;a[468]=117.0;a[469]=-0.4540;a[470]=0.8910;a[471]=-1.9626;a[472]=118.0;a[473]=-0.4695;a[474]=0.8829;a[475]=-1.8807;a[476]=119.0;a[477]=-0.4848;a[478]=0.8746;a[479]=-1.8040;a[480]=120.0;a[481]=-0.5000;a[482]=0.8660;a[483]=-1.7321;a[484]=121.0;a[485]=-0.5150;a[486]=0.8572;a[487]=-1.6643;a[488]=122.0;a[489]=-0.5299;a[490]=0.8480;a[491]=-1.6003;a[492]=123.0;a[493]=-0.5446;a[494]=0.8387;a[495]=-1.5399;a[496]=124.0;a[497]=-0.5592;a[498]=0.8290;a[499]=-1.4826;a[500]=125.0;a[501]=-0.5736;a[502]=0.8192;a[503]=-1.4281;a[504]=126.0;a[505]=-0.5878;a[506]=0.8090;a[507]=-1.3764;a[508]=127.0;a[509]=-0.6018;a[510]=0.7986;a[511]=-1.3270;a[512]=128.0;a[513]=-0.6157;a[514]=0.7880;a[515]=-1.2799;a[516]=129.0;a[517]=-0.6293;a[518]=0.7771;a[519]=-1.2349;a[520]=130.0;a[521]=-0.6428;a[522]=0.7660;a[523]=-1.1918;a[524]=131.0;a[525]=-0.6561;a[526]=0.7547;a[527]=-1.1504;a[528]=132.0;a[529]=-0.6691;a[530]=0.7431;a[531]=-1.1106;a[532]=133.0;a[533]=-0.6820;a[534]=0.7314;a[535]=-1.0724;a[536]=134.0;a[537]=-0.6947;a[538]=0.7193;a[539]=-1.0355;a[540]=135.0;a[541]=-0.7071;a[542]=0.7071;a[543]=-1.0000;a[544]=136.0;a[545]=-0.7193;a[546]=0.6947;a[547]=-0.9657;a[548]=137.0;a[549]=-0.7314;a[550]=0.6820;a[551]=-0.9325;a[552]=138.0;a[553]=-0.7431;a[554]=0.6691;a[555]=-0.9004;a[556]=139.0;a[557]=-0.7547;a[558]=0.6561;a[559]=-0.8693;a[560]=140.0;a[561]=-0.7660;a[562]=0.6428;a[563]=-0.8391;a[564]=141.0;a[565]=-0.7771;a[566]=0.6293;a[567]=-0.8098;a[568]=142.0;a[569]=-0.7880;a[570]=0.6157;a[571]=-0.7813;a[572]=143.0;a[573]=-0.7986;a[574]=0.6018;a[575]=-0.7536;a[576]=144.0;a[577]=-0.8090;a[578]=0.5878;a[579]=-0.7265;a[580]=145.0;a[581]=-0.8192;a[582]=0.5736;a[583]=-0.7002;a[584]=146.0;a[585]=-0.8290;a[586]=0.5592;a[587]=-0.6745;a[588]=147.0;a[589]=-0.8387;a[590]=0.5446;a[591]=-0.6494;a[592]=148.0;a[593]=-0.8480;a[594]=0.5299;a[595]=-0.6249;a[596]=149.0;a[597]=-0.8572;a[598]=0.5150;a[599]=-0.6009;a[600]=150.0;a[601]=-0.8660;a[602]=0.5000;a[603]=-0.5774;a[604]=151.0;a[605]=-0.8746;a[606]=0.4848;a[607]=-0.5543;a[608]=152.0;a[609]=-0.8829;a[610]=0.4695;a[611]=-0.5317;a[612]=153.0;a[613]=-0.8910;a[614]=0.4540;a[615]=-0.5095;a[616]=154.0;a[617]=-0.8988;a[618]=0.4384;a[619]=-0.4877;a[620]=155.0;a[621]=-0.9063;a[622]=0.4226;a[623]=-0.4663;a[624]=156.0;a[625]=-0.9135;a[626]=0.4067;a[627]=-0.4452;a[628]=157.0;a[629]=-0.9205;a[630]=0.3907;a[631]=-0.4245;a[632]=158.0;a[633]=-0.9272;a[634]=0.3746;a[635]=-0.4040;a[636]=159.0;a[637]=-0.9336;a[638]=0.3584;a[639]=-0.3839;a[640]=160.0;a[641]=-0.9397;a[642]=0.3420;a[643]=-0.3640;a[644]=161.0;a[645]=-0.9455;a[646]=0.3256;a[647]=-0.3443;a[648]=162.0;a[649]=-0.9511;a[650]=0.3090;a[651]=-0.3249;a[652]=163.0;a[653]=-0.9563;a[654]=0.2924;a[655]=-0.3057;a[656]=164.0;a[657]=-0.9613;a[658]=0.2756;a[659]=-0.2867;a[660]=165.0;a[661]=-0.9659;a[662]=0.2588;a[663]=-0.2679;a[664]=166.0;a[665]=-0.9703;a[666]=0.2419;a[667]=-0.2493;a[668]=167.0;a[669]=-0.9744;a[670]=0.2250;a[671]=-0.2309;a[672]=168.0;a[673]=-0.9781;a[674]=0.2079;a[675]=-0.2126;a[676]=169.0;a[677]=-0.9816;a[678]=0.1908;a[679]=-0.1944;a[680]=170.0;a[681]=-0.9848;a[682]=0.1736;a[683]=-0.1763;a[684]=171.0;a[685]=-0.9877;a[686]=0.1564;a[687]=-0.1584;a[688]=172.0;a[689]=-0.9903;a[690]=0.1392;a[691]=-0.1405;a[692]=173.0;a[693]=-0.9925;a[694]=0.1219;a[695]=-0.1228;a[696]=174.0;a[697]=-0.9945;a[698]=0.1045;a[699]=-0.1051;a[700]=175.0;a[701]=-0.9962;a[702]=0.0872;a[703]=-0.0875;a[704]=176.0;a[705]=-0.9976;a[706]=0.0698;a[707]=-0.0699;a[708]=177.0;a[709]=-0.9986;a[710]=0.0523;a[711]=-0.0524;a[712]=178.0;a[713]=-0.9994;a[714]=0.0349;a[715]=-0.0349;a[716]=179.0;a[717]=-0.9998;a[718]=0.0175;a[719]=-0.0175;a[720]=180.0;a[721]=-1.0000;a[722]=0.0000;a[723]=0.0000;a[724]=181.0;a[725]=-0.9998;a[726]=-0.0175;a[727]=0.0175;a[728]=182.0;a[729]=-0.9994;a[730]=-0.0349;a[731]=0.0349;a[732]=183.0;a[733]=-0.9986;a[734]=-0.0523;a[735]=0.0524;a[736]=184.0;a[737]=-0.9976;a[738]=-0.0698;a[739]=0.0699;a[740]=185.0;a[741]=-0.9962;a[742]=-0.0872;a[743]=0.0875;a[744]=186.0;a[745]=-0.9945;a[746]=-0.1045;a[747]=0.1051;a[748]=187.0;a[749]=-0.9925;a[750]=-0.1219;a[751]=0.1228;a[752]=188.0;a[753]=-0.9903;a[754]=-0.1392;a[755]=0.1405;a[756]=189.0;a[757]=-0.9877;a[758]=-0.1564;a[759]=0.1584;a[760]=190.0;a[761]=-0.9848;a[762]=-0.1736;a[763]=0.1763;a[764]=191.0;a[765]=-0.9816;a[766]=-0.1908;a[767]=0.1944;a[768]=192.0;a[769]=-0.9781;a[770]=-0.2079;a[771]=0.2126;a[772]=193.0;a[773]=-0.9744;a[774]=-0.2250;a[775]=0.2309;a[776]=194.0;a[777]=-0.9703;a[778]=-0.2419;a[779]=0.2493;a[780]=195.0;a[781]=-0.9659;a[782]=-0.2588;a[783]=0.2679;a[784]=196.0;a[785]=-0.9613;a[786]=-0.2756;a[787]=0.2867;a[788]=197.0;a[789]=-0.9563;a[790]=-0.2924;a[791]=0.3057;a[792]=198.0;a[793]=-0.9511;a[794]=-0.3090;a[795]=0.3249;a[796]=199.0;a[797]=-0.9455;a[798]=-0.3256;a[799]=0.3443;a[800]=200.0;a[801]=-0.9397;a[802]=-0.3420;a[803]=0.3640;
+a[804]=201.0;a[805]=-0.9336;a[806]=-0.3584;a[807]=0.3839;a[808]=202.0;a[809]=-0.9272;a[810]=-0.3746;a[811]=0.4040;a[812]=203.0;a[813]=-0.9205;a[814]=-0.3907;a[815]=0.4245;a[816]=204.0;a[817]=-0.9135;a[818]=-0.4067;a[819]=0.4452;a[820]=205.0;a[821]=-0.9063;a[822]=-0.4226;a[823]=0.4663;a[824]=206.0;a[825]=-0.8988;a[826]=-0.4384;a[827]=0.4877;a[828]=207.0;a[829]=-0.8910;a[830]=-0.4540;a[831]=0.5095;a[832]=208.0;a[833]=-0.8829;a[834]=-0.4695;a[835]=0.5317;a[836]=209.0;a[837]=-0.8746;a[838]=-0.4848;a[839]=0.5543;a[840]=210.0;a[841]=-0.8660;a[842]=-0.5000;a[843]=0.5774;a[844]=211.0;a[845]=-0.8572;a[846]=-0.5150;a[847]=0.6009;a[848]=212.0;a[849]=-0.8480;a[850]=-0.5299;a[851]=0.6249;a[852]=213.0;a[853]=-0.8387;a[854]=-0.5446;a[855]=0.6494;a[856]=214.0;a[857]=-0.8290;a[858]=-0.5592;a[859]=0.6745;a[860]=215.0;a[861]=-0.8192;a[862]=-0.5736;a[863]=0.7002;a[864]=216.0;a[865]=-0.8090;a[866]=-0.5878;a[867]=0.7265;a[868]=217.0;a[869]=-0.7986;a[870]=-0.6018;a[871]=0.7536;a[872]=218.0;a[873]=-0.7880;a[874]=-0.6157;a[875]=0.7813;a[876]=219.0;a[877]=-0.7771;a[878]=-0.6293;a[879]=0.8098;a[880]=220.0;a[881]=-0.7660;a[882]=-0.6428;a[883]=0.8391;a[884]=221.0;a[885]=-0.7547;a[886]=-0.6561;a[887]=0.8693;a[888]=222.0;a[889]=-0.7431;a[890]=-0.6691;a[891]=0.9004;a[892]=223.0;a[893]=-0.7314;a[894]=-0.6820;a[895]=0.9325;a[896]=224.0;a[897]=-0.7193;a[898]=-0.6947;a[899]=0.9657;a[900]=225.0;a[901]=-0.7071;a[902]=-0.7071;a[903]=1.0000;a[904]=226.0;a[905]=-0.6947;a[906]=-0.7193;a[907]=1.0355;a[908]=227.0;a[909]=-0.6820;a[910]=-0.7314;a[911]=1.0724;a[912]=228.0;a[913]=-0.6691;a[914]=-0.7431;a[915]=1.1106;a[916]=229.0;a[917]=-0.6561;a[918]=-0.7547;a[919]=1.1504;a[920]=230.0;a[921]=-0.6428;a[922]=-0.7660;a[923]=1.1918;a[924]=231.0;a[925]=-0.6293;a[926]=-0.7771;a[927]=1.2349;a[928]=232.0;a[929]=-0.6157;a[930]=-0.7880;a[931]=1.2799;a[932]=233.0;a[933]=-0.6018;a[934]=-0.7986;a[935]=1.3270;a[936]=234.0;a[937]=-0.5878;a[938]=-0.8090;a[939]=1.3764;a[940]=235.0;a[941]=-0.5736;a[942]=-0.8192;a[943]=1.4281;a[944]=236.0;a[945]=-0.5592;a[946]=-0.8290;a[947]=1.4826;a[948]=237.0;a[949]=-0.5446;a[950]=-0.8387;a[951]=1.5399;a[952]=238.0;a[953]=-0.5299;a[954]=-0.8480;a[955]=1.6003;a[956]=239.0;a[957]=-0.5150;a[958]=-0.8572;a[959]=1.6643;a[960]=240.0;a[961]=-0.5000;a[962]=-0.8660;a[963]=1.7321;a[964]=241.0;a[965]=-0.4848;a[966]=-0.8746;a[967]=1.8040;a[968]=242.0;a[969]=-0.4695;a[970]=-0.8829;a[971]=1.8807;a[972]=243.0;a[973]=-0.4540;a[974]=-0.8910;a[975]=1.9626;a[976]=244.0;a[977]=-0.4384;a[978]=-0.8988;a[979]=2.0503;a[980]=245.0;a[981]=-0.4226;a[982]=-0.9063;a[983]=2.1445;a[984]=246.0;a[985]=-0.4067;a[986]=-0.9135;a[987]=2.2460;a[988]=247.0;a[989]=-0.3907;a[990]=-0.9205;a[991]=2.3559;a[992]=248.0;a[993]=-0.3746;a[994]=-0.9272;a[995]=2.4751;a[996]=249.0;a[997]=-0.3584;a[998]=-0.9336;a[999]=2.6051;a[1000]=250.0;a[1001]=-0.3420;a[1002]=-0.9397;a[1003]=2.7475;a[1004]=251.0;a[1005]=-0.3256;a[1006]=-0.9455;a[1007]=2.9042;a[1008]=252.0;a[1009]=-0.3090;a[1010]=-0.9511;a[1011]=3.0777;a[1012]=253.0;a[1013]=-0.2924;a[1014]=-0.9563;a[1015]=3.2709;a[1016]=254.0;a[1017]=-0.2756;a[1018]=-0.9613;a[1019]=3.4874;a[1020]=255.0;a[1021]=-0.2588;a[1022]=-0.9659;a[1023]=3.7321;a[1024]=256.0;a[1025]=-0.2419;a[1026]=-0.9703;a[1027]=4.0108;a[1028]=257.0;a[1029]=-0.2250;a[1030]=-0.9744;a[1031]=4.3315;a[1032]=258.0;a[1033]=-0.2079;a[1034]=-0.9781;a[1035]=4.7046;a[1036]=259.0;a[1037]=-0.1908;a[1038]=-0.9816;a[1039]=5.1446;a[1040]=260.0;a[1041]=-0.1736;a[1042]=-0.9848;a[1043]=5.6713;a[1044]=261.0;a[1045]=-0.1564;a[1046]=-0.9877;a[1047]=6.3138;a[1048]=262.0;a[1049]=-0.1392;a[1050]=-0.9903;a[1051]=7.1154;a[1052]=263.0;a[1053]=-0.1219;a[1054]=-0.9925;a[1055]=8.1443;a[1056]=264.0;a[1057]=-0.1045;a[1058]=-0.9945;a[1059]=9.5144;a[1060]=265.0;a[1061]=-0.0872;a[1062]=-0.9962;a[1063]=11.4301;a[1064]=266.0;a[1065]=-0.0698;a[1066]=-0.9976;a[1067]=14.3007;a[1068]=267.0;a[1069]=-0.0523;a[1070]=-0.9986;a[1071]=19.0811;a[1072]=268.0;a[1073]=-0.0349;a[1074]=-0.9994;a[1075]=28.6363;a[1076]=269.0;a[1077]=-0.0175;a[1078]=-0.9998;a[1079]=57.2900;a[1080]=270.0;a[1081]=0.0000;a[1082]=-1.0000;a[1083]=5443746451065123.0000;a[1084]=271.0;a[1085]=0.0175;a[1086]=-0.9998;a[1087]=-57.2900;a[1088]=272.0;a[1089]=0.0349;a[1090]=-0.9994;a[1091]=-28.6363;a[1092]=273.0;a[1093]=0.0523;a[1094]=-0.9986;a[1095]=-19.0811;a[1096]=274.0;a[1097]=0.0698;a[1098]=-0.9976;a[1099]=-14.3007;a[1100]=275.0;a[1101]=0.0872;a[1102]=-0.9962;a[1103]=-11.4301;a[1104]=276.0;a[1105]=0.1045;a[1106]=-0.9945;a[1107]=-9.5144;a[1108]=277.0;a[1109]=0.1219;a[1110]=-0.9925;a[1111]=-8.1443;a[1112]=278.0;a[1113]=0.1392;a[1114]=-0.9903;a[1115]=-7.1154;a[1116]=279.0;a[1117]=0.1564;a[1118]=-0.9877;a[1119]=-6.3138;a[1120]=280.0;a[1121]=0.1736;a[1122]=-0.9848;a[1123]=-5.6713;a[1124]=281.0;a[1125]=0.1908;a[1126]=-0.9816;a[1127]=-5.1446;a[1128]=282.0;a[1129]=0.2079;a[1130]=-0.9781;a[1131]=-4.7046;a[1132]=283.0;a[1133]=0.2250;a[1134]=-0.9744;a[1135]=-4.3315;a[1136]=284.0;a[1137]=0.2419;a[1138]=-0.9703;a[1139]=-4.0108;a[1140]=285.0;a[1141]=0.2588;a[1142]=-0.9659;a[1143]=-3.7321;a[1144]=286.0;a[1145]=0.2756;a[1146]=-0.9613;a[1147]=-3.4874;a[1148]=287.0;a[1149]=0.2924;a[1150]=-0.9563;a[1151]=-3.2709;a[1152]=288.0;a[1153]=0.3090;a[1154]=-0.9511;a[1155]=-3.0777;a[1156]=289.0;a[1157]=0.3256;a[1158]=-0.9455;a[1159]=-2.9042;a[1160]=290.0;a[1161]=0.3420;a[1162]=-0.9397;a[1163]=-2.7475;a[1164]=291.0;a[1165]=0.3584;a[1166]=-0.9336;a[1167]=-2.6051;a[1168]=292.0;a[1169]=0.3746;a[1170]=-0.9272;a[1171]=-2.4751;a[1172]=293.0;a[1173]=0.3907;a[1174]=-0.9205;a[1175]=-2.3559;a[1176]=294.0;a[1177]=0.4067;a[1178]=-0.9135;a[1179]=-2.2460;a[1180]=295.0;a[1181]=0.4226;a[1182]=-0.9063;a[1183]=-2.1445;a[1184]=296.0;a[1185]=0.4384;a[1186]=-0.8988;a[1187]=-2.0503;a[1188]=297.0;a[1189]=0.4540;a[1190]=-0.8910;a[1191]=-1.9626;a[1192]=298.0;a[1193]=0.4695;a[1194]=-0.8829;a[1195]=-1.8807;a[1196]=299.0;a[1197]=0.4848;a[1198]=-0.8746;a[1199]=-1.8040;a[1200]=300.0;a[1201]=0.5000;a[1202]=-0.8660;a[1203]=-1.7321;
+a[1204]=301.0;a[1205]=0.5150;a[1206]=-0.8572;a[1207]=-1.6643;a[1208]=302.0;a[1209]=0.5299;a[1210]=-0.8480;a[1211]=-1.6003;a[1212]=303.0;a[1213]=0.5446;a[1214]=-0.8387;a[1215]=-1.5399;a[1216]=304.0;a[1217]=0.5592;a[1218]=-0.8290;a[1219]=-1.4826;a[1220]=305.0;a[1221]=0.5736;a[1222]=-0.8192;a[1223]=-1.4281;a[1224]=306.0;a[1225]=0.5878;a[1226]=-0.8090;a[1227]=-1.3764;a[1228]=307.0;a[1229]=0.6018;a[1230]=-0.7986;a[1231]=-1.3270;a[1232]=308.0;a[1233]=0.6157;a[1234]=-0.7880;a[1235]=-1.2799;a[1236]=309.0;a[1237]=0.6293;a[1238]=-0.7771;a[1239]=-1.2349;a[1240]=310.0;a[1241]=0.6428;a[1242]=-0.7660;a[1243]=-1.1918;a[1244]=311.0;a[1245]=0.6561;a[1246]=-0.7547;a[1247]=-1.1504;a[1248]=312.0;a[1249]=0.6691;a[1250]=-0.7431;a[1251]=-1.1106;a[1252]=313.0;a[1253]=0.6820;a[1254]=-0.7314;a[1255]=-1.0724;a[1256]=314.0;a[1257]=0.6947;a[1258]=-0.7193;a[1259]=-1.0355;a[1260]=315.0;a[1261]=0.7071;a[1262]=-0.7071;a[1263]=-1.0000;a[1264]=316.0;a[1265]=0.7193;a[1266]=-0.6947;a[1267]=-0.9657;a[1268]=317.0;a[1269]=0.7314;a[1270]=-0.6820;a[1271]=-0.9325;a[1272]=318.0;a[1273]=0.7431;a[1274]=-0.6691;a[1275]=-0.9004;a[1276]=319.0;a[1277]=0.7547;a[1278]=-0.6561;a[1279]=-0.8693;a[1280]=320.0;a[1281]=0.7660;a[1282]=-0.6428;a[1283]=-0.8391;a[1284]=321.0;a[1285]=0.7771;a[1286]=-0.6293;a[1287]=-0.8098;a[1288]=322.0;a[1289]=0.7880;a[1290]=-0.6157;a[1291]=-0.7813;a[1292]=323.0;a[1293]=0.7986;a[1294]=-0.6018;a[1295]=-0.7536;a[1296]=324.0;a[1297]=0.8090;a[1298]=-0.5878;a[1299]=-0.7265;a[1300]=325.0;a[1301]=0.8192;a[1302]=-0.5736;a[1303]=-0.7002;a[1304]=326.0;a[1305]=0.8290;a[1306]=-0.5592;a[1307]=-0.6745;a[1308]=327.0;a[1309]=0.8387;a[1310]=-0.5446;a[1311]=-0.6494;a[1312]=328.0;a[1313]=0.8480;a[1314]=-0.5299;a[1315]=-0.6249;a[1316]=329.0;a[1317]=0.8572;a[1318]=-0.5150;a[1319]=-0.6009;a[1320]=330.0;a[1321]=0.8660;a[1322]=-0.5000;a[1323]=-0.5774;a[1324]=331.0;a[1325]=0.8746;a[1326]=-0.4848;a[1327]=-0.5543;a[1328]=332.0;a[1329]=0.8829;a[1330]=-0.4695;a[1331]=-0.5317;a[1332]=333.0;a[1333]=0.8910;a[1334]=-0.4540;a[1335]=-0.5095;a[1336]=334.0;a[1337]=0.8988;a[1338]=-0.4384;a[1339]=-0.4877;a[1340]=335.0;a[1341]=0.9063;a[1342]=-0.4226;a[1343]=-0.4663;a[1344]=336.0;a[1345]=0.9135;a[1346]=-0.4067;a[1347]=-0.4452;a[1348]=337.0;a[1349]=0.9205;a[1350]=-0.3907;a[1351]=-0.4245;a[1352]=338.0;a[1353]=0.9272;a[1354]=-0.3746;a[1355]=-0.4040;a[1356]=339.0;a[1357]=0.9336;a[1358]=-0.3584;a[1359]=-0.3839;a[1360]=340.0;a[1361]=0.9397;a[1362]=-0.3420;a[1363]=-0.3640;a[1364]=341.0;a[1365]=0.9455;a[1366]=-0.3256;a[1367]=-0.3443;a[1368]=342.0;a[1369]=0.9511;a[1370]=-0.3090;a[1371]=-0.3249;a[1372]=343.0;a[1373]=0.9563;a[1374]=-0.2924;a[1375]=-0.3057;a[1376]=344.0;a[1377]=0.9613;a[1378]=-0.2756;a[1379]=-0.2867;a[1380]=345.0;a[1381]=0.9659;a[1382]=-0.2588;a[1383]=-0.2679;a[1384]=346.0;a[1385]=0.9703;a[1386]=-0.2419;a[1387]=-0.2493;a[1388]=347.0;a[1389]=0.9744;a[1390]=-0.2250;a[1391]=-0.2309;a[1392]=348.0;a[1393]=0.9781;a[1394]=-0.2079;a[1395]=-0.2126;a[1396]=349.0;a[1397]=0.9816;a[1398]=-0.1908;a[1399]=-0.1944;a[1400]=350.0;a[1401]=0.9848;a[1402]=-0.1736;a[1403]=-0.1763;a[1404]=351.0;a[1405]=0.9877;a[1406]=-0.1564;a[1407]=-0.1584;a[1408]=352.0;a[1409]=0.9903;a[1410]=-0.1392;a[1411]=-0.1405;a[1412]=353.0;a[1413]=0.9925;a[1414]=-0.1219;a[1415]=-0.1228;a[1416]=354.0;a[1417]=0.9945;a[1418]=-0.1045;a[1419]=-0.1051;a[1420]=355.0;a[1421]=0.9962;a[1422]=-0.0872;a[1423]=-0.0875;a[1424]=356.0;a[1425]=0.9976;a[1426]=-0.0698;a[1427]=-0.0699;a[1428]=357.0;a[1429]=0.9986;a[1430]=-0.0523;a[1431]=-0.0524;a[1432]=358.0;a[1433]=0.9994;a[1434]=-0.0349;a[1435]=-0.0349;a[1436]=359.0;a[1437]=0.9998;a[1438]=-0.0175;a[1439]=-0.0175;a[1440]=360.0;a[1441]=1.0000;a[1442]=0.0000;a[1443]=0.0000;
+
+		i = i % 360;
+		if (i<0) i += 360;
+		int j = 4*i;
+		double[4] m = {a[j],a[j+1],a[j+2],a[j+3]};
+		return m;
+	}
+			
+	//modelling obstacle detection with laser beams	
+	@priority(1)
+	msgsrv scanObstacles(Node robot,int rindex,int rate,int fov,int max_distance){	
+		int[8][2] nxt = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+		int i,j,k,rx,ry,rdir,rspeed;
+		
+		//prepare scan data here --> list of nearest obstacles around the robot, return (X,Y) coordinates to the robot's axises
+		int[101] scandata;
+		for(i=0;i<101;i++) scandata[i]=0;
+		int[101] angles;
+		for(i=0;i<101;i++) angles[i]=0;
+		
+//define the occupancy grid
+boolean[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/] map;
+for(i=0;i<MAP_HEIGHT;i++)for(j=0;j<MAP_WIDTH;j++)map[i][j]=false;	
+map[8][18]=true;map[8][19]=true;map[8][20]=true;map[8][21]=true;map[8][22]=true;map[9][18]=true;map[9][19]=true;map[9][20]=true;map[9][21]=true;map[9][22]=true;map[10][18]=true;map[10][19]=true;map[10][20]=true;map[10][21]=true;map[10][22]=true;map[11][18]=true;map[11][19]=true;map[11][20]=true;map[11][21]=true;map[11][22]=true;map[12][18]=true;map[12][19]=true;map[12][20]=true;map[12][21]=true;map[12][22]=true;map[13][18]=true;map[13][19]=true;map[13][20]=true;map[13][21]=true;map[13][22]=true;map[14][18]=true;map[14][19]=true;map[14][20]=true;map[14][21]=true;map[14][22]=true;map[15][18]=true;map[15][19]=true;map[15][20]=true;map[15][21]=true;map[15][22]=true;map[16][18]=true;map[16][19]=true;map[16][20]=true;map[16][21]=true;map[16][22]=true;map[17][18]=true;map[17][19]=true;map[17][20]=true;map[17][21]=true;map[17][22]=true;map[18][18]=true;map[18][19]=true;map[18][20]=true;map[18][21]=true;map[18][22]=true;map[19][18]=true;map[19][19]=true;map[19][20]=true;map[19][21]=true;map[19][22]=true;map[20][18]=true;map[20][19]=true;map[20][20]=true;map[20][21]=true;map[20][22]=true;map[21][18]=true;map[21][19]=true;map[21][20]=true;map[21][21]=true;map[21][22]=true;map[22][18]=true;map[22][19]=true;map[22][20]=true;map[22][21]=true;map[22][22]=true;map[23][18]=true;map[23][19]=true;map[23][20]=true;map[23][21]=true;map[23][22]=true;map[24][18]=true;map[24][19]=true;map[24][20]=true;map[24][21]=true;map[24][22]=true;map[25][18]=true;map[25][19]=true;map[25][20]=true;map[25][21]=true;map[25][22]=true;map[26][19]=true;map[26][20]=true;map[26][21]=true;map[30][33]=true;map[30][34]=true;map[30][35]=true;map[30][36]=true;map[30][37]=true;map[30][38]=true;map[30][39]=true;map[30][40]=true;map[30][41]=true;map[31][33]=true;map[31][34]=true;map[31][35]=true;map[31][36]=true;map[31][37]=true;map[31][38]=true;map[31][39]=true;map[31][40]=true;map[31][41]=true;map[32][33]=true;map[32][34]=true;map[32][35]=true;map[32][36]=true;map[32][37]=true;map[32][38]=true;map[32][39]=true;map[32][40]=true;map[32][41]=true;map[33][4]=true;map[33][5]=true;map[33][6]=true;map[33][7]=true;map[33][8]=true;map[33][9]=true;map[33][10]=true;map[33][33]=true;map[33][34]=true;map[33][35]=true;map[33][36]=true;map[33][37]=true;map[33][38]=true;map[33][39]=true;map[33][40]=true;map[33][41]=true;map[34][4]=true;map[34][5]=true;map[34][6]=true;map[34][7]=true;map[34][8]=true;map[34][9]=true;map[34][10]=true;map[34][11]=true;map[34][33]=true;map[34][34]=true;map[34][35]=true;map[34][36]=true;map[34][37]=true;map[34][38]=true;map[34][39]=true;map[34][40]=true;map[34][41]=true;map[35][4]=true;map[35][5]=true;map[35][6]=true;map[35][7]=true;map[35][8]=true;map[35][9]=true;map[35][10]=true;map[35][11]=true;map[36][4]=true;map[36][5]=true;map[36][6]=true;map[36][7]=true;map[36][8]=true;map[36][9]=true;map[36][10]=true;map[36][11]=true;map[37][4]=true;map[37][5]=true;map[37][6]=true;map[37][7]=true;map[37][8]=true;map[37][9]=true;map[37][10]=true;map[37][11]=true;map[37][23]=true;map[37][24]=true;map[38][4]=true;map[38][5]=true;map[38][6]=true;map[38][7]=true;map[38][8]=true;map[38][9]=true;map[38][10]=true;map[38][11]=true;map[38][22]=true;map[38][23]=true;map[38][24]=true;map[38][25]=true;map[39][21]=true;map[39][22]=true;map[39][23]=true;map[39][24]=true;map[39][25]=true;map[39][26]=true;map[40][21]=true;map[40][22]=true;map[40][23]=true;map[40][24]=true;map[40][25]=true;map[40][26]=true;map[41][21]=true;map[41][22]=true;map[41][23]=true;map[41][24]=true;map[41][25]=true;map[41][26]=true;map[42][22]=true;map[42][23]=true;map[42][24]=true;map[42][25]=true;
+				
+		for (i=1;i<=rloc[0];i++){
+			if (i!=rindex){
+				rx=rloc[4*(i-1)+1];
+				ry=rloc[4*(i-1)+2];
+				rspeed = rloc[4*(i-1)+3];
+				rdir = rloc[4*(i-1)+4];
+				if (isInside(rx,ry)) map[rx][ry]=true;
+				/*
+				int[8][2] ns = getNeighbors(rx,ry);
+				for(int ii=0;ii<8;ii++){
+					if (isInside(ns[i][0],ns[i][1])) map[ns[i][0]][ns[i][1]]=true;
+				}
+				*/			
+			}
+		}
+		
+		//precalculated trigonometric values
+double[1444] a;
+a[0]=0.0;a[1]=1.0000;a[2]=0.0000;a[3]=0.0000;a[4]=1.0;a[5]=0.9998;a[6]=0.0175;a[7]=0.0175;a[8]=2.0;a[9]=0.9994;a[10]=0.0349;a[11]=0.0349;a[12]=3.0;a[13]=0.9986;a[14]=0.0523;a[15]=0.0524;a[16]=4.0;a[17]=0.9976;a[18]=0.0698;a[19]=0.0699;a[20]=5.0;a[21]=0.9962;a[22]=0.0872;a[23]=0.0875;a[24]=6.0;a[25]=0.9945;a[26]=0.1045;a[27]=0.1051;a[28]=7.0;a[29]=0.9925;a[30]=0.1219;a[31]=0.1228;a[32]=8.0;a[33]=0.9903;a[34]=0.1392;a[35]=0.1405;a[36]=9.0;a[37]=0.9877;a[38]=0.1564;a[39]=0.1584;a[40]=10.0;a[41]=0.9848;a[42]=0.1736;a[43]=0.1763;a[44]=11.0;a[45]=0.9816;a[46]=0.1908;a[47]=0.1944;a[48]=12.0;a[49]=0.9781;a[50]=0.2079;a[51]=0.2126;a[52]=13.0;a[53]=0.9744;a[54]=0.2250;a[55]=0.2309;a[56]=14.0;a[57]=0.9703;a[58]=0.2419;a[59]=0.2493;a[60]=15.0;a[61]=0.9659;a[62]=0.2588;a[63]=0.2679;a[64]=16.0;a[65]=0.9613;a[66]=0.2756;a[67]=0.2867;a[68]=17.0;a[69]=0.9563;a[70]=0.2924;a[71]=0.3057;a[72]=18.0;a[73]=0.9511;a[74]=0.3090;a[75]=0.3249;a[76]=19.0;a[77]=0.9455;a[78]=0.3256;a[79]=0.3443;a[80]=20.0;a[81]=0.9397;a[82]=0.3420;a[83]=0.3640;a[84]=21.0;a[85]=0.9336;a[86]=0.3584;a[87]=0.3839;a[88]=22.0;a[89]=0.9272;a[90]=0.3746;a[91]=0.4040;a[92]=23.0;a[93]=0.9205;a[94]=0.3907;a[95]=0.4245;a[96]=24.0;a[97]=0.9135;a[98]=0.4067;a[99]=0.4452;a[100]=25.0;a[101]=0.9063;a[102]=0.4226;a[103]=0.4663;a[104]=26.0;a[105]=0.8988;a[106]=0.4384;a[107]=0.4877;a[108]=27.0;a[109]=0.8910;a[110]=0.4540;a[111]=0.5095;a[112]=28.0;a[113]=0.8829;a[114]=0.4695;a[115]=0.5317;a[116]=29.0;a[117]=0.8746;a[118]=0.4848;a[119]=0.5543;a[120]=30.0;a[121]=0.8660;a[122]=0.5000;a[123]=0.5774;a[124]=31.0;a[125]=0.8572;a[126]=0.5150;a[127]=0.6009;a[128]=32.0;a[129]=0.8480;a[130]=0.5299;a[131]=0.6249;a[132]=33.0;a[133]=0.8387;a[134]=0.5446;a[135]=0.6494;a[136]=34.0;a[137]=0.8290;a[138]=0.5592;a[139]=0.6745;a[140]=35.0;a[141]=0.8192;a[142]=0.5736;a[143]=0.7002;a[144]=36.0;a[145]=0.8090;a[146]=0.5878;a[147]=0.7265;a[148]=37.0;a[149]=0.7986;a[150]=0.6018;a[151]=0.7536;a[152]=38.0;a[153]=0.7880;a[154]=0.6157;a[155]=0.7813;a[156]=39.0;a[157]=0.7771;a[158]=0.6293;a[159]=0.8098;a[160]=40.0;a[161]=0.7660;a[162]=0.6428;a[163]=0.8391;a[164]=41.0;a[165]=0.7547;a[166]=0.6561;a[167]=0.8693;a[168]=42.0;a[169]=0.7431;a[170]=0.6691;a[171]=0.9004;a[172]=43.0;a[173]=0.7314;a[174]=0.6820;a[175]=0.9325;a[176]=44.0;a[177]=0.7193;a[178]=0.6947;a[179]=0.9657;a[180]=45.0;a[181]=0.7071;a[182]=0.7071;a[183]=1.0000;a[184]=46.0;a[185]=0.6947;a[186]=0.7193;a[187]=1.0355;a[188]=47.0;a[189]=0.6820;a[190]=0.7314;a[191]=1.0724;a[192]=48.0;a[193]=0.6691;a[194]=0.7431;a[195]=1.1106;a[196]=49.0;a[197]=0.6561;a[198]=0.7547;a[199]=1.1504;a[200]=50.0;a[201]=0.6428;a[202]=0.7660;a[203]=1.1918;a[204]=51.0;a[205]=0.6293;a[206]=0.7771;a[207]=1.2349;a[208]=52.0;a[209]=0.6157;a[210]=0.7880;a[211]=1.2799;a[212]=53.0;a[213]=0.6018;a[214]=0.7986;a[215]=1.3270;a[216]=54.0;a[217]=0.5878;a[218]=0.8090;a[219]=1.3764;a[220]=55.0;a[221]=0.5736;a[222]=0.8192;a[223]=1.4281;a[224]=56.0;a[225]=0.5592;a[226]=0.8290;a[227]=1.4826;a[228]=57.0;a[229]=0.5446;a[230]=0.8387;a[231]=1.5399;a[232]=58.0;a[233]=0.5299;a[234]=0.8480;a[235]=1.6003;a[236]=59.0;a[237]=0.5150;a[238]=0.8572;a[239]=1.6643;a[240]=60.0;a[241]=0.5000;a[242]=0.8660;a[243]=1.7321;a[244]=61.0;a[245]=0.4848;a[246]=0.8746;a[247]=1.8040;a[248]=62.0;a[249]=0.4695;a[250]=0.8829;a[251]=1.8807;a[252]=63.0;a[253]=0.4540;a[254]=0.8910;a[255]=1.9626;a[256]=64.0;a[257]=0.4384;a[258]=0.8988;a[259]=2.0503;a[260]=65.0;a[261]=0.4226;a[262]=0.9063;a[263]=2.1445;a[264]=66.0;a[265]=0.4067;a[266]=0.9135;a[267]=2.2460;a[268]=67.0;a[269]=0.3907;a[270]=0.9205;a[271]=2.3559;a[272]=68.0;a[273]=0.3746;a[274]=0.9272;a[275]=2.4751;a[276]=69.0;a[277]=0.3584;a[278]=0.9336;a[279]=2.6051;a[280]=70.0;a[281]=0.3420;a[282]=0.9397;a[283]=2.7475;a[284]=71.0;a[285]=0.3256;a[286]=0.9455;a[287]=2.9042;a[288]=72.0;a[289]=0.3090;a[290]=0.9511;a[291]=3.0777;a[292]=73.0;a[293]=0.2924;a[294]=0.9563;a[295]=3.2709;a[296]=74.0;a[297]=0.2756;a[298]=0.9613;a[299]=3.4874;a[300]=75.0;a[301]=0.2588;a[302]=0.9659;a[303]=3.7321;a[304]=76.0;a[305]=0.2419;a[306]=0.9703;a[307]=4.0108;a[308]=77.0;a[309]=0.2250;a[310]=0.9744;a[311]=4.3315;a[312]=78.0;a[313]=0.2079;a[314]=0.9781;a[315]=4.7046;a[316]=79.0;a[317]=0.1908;a[318]=0.9816;a[319]=5.1446;a[320]=80.0;a[321]=0.1736;a[322]=0.9848;a[323]=5.6713;a[324]=81.0;a[325]=0.1564;a[326]=0.9877;a[327]=6.3138;a[328]=82.0;a[329]=0.1392;a[330]=0.9903;a[331]=7.1154;a[332]=83.0;a[333]=0.1219;a[334]=0.9925;a[335]=8.1443;a[336]=84.0;a[337]=0.1045;a[338]=0.9945;a[339]=9.5144;a[340]=85.0;a[341]=0.0872;a[342]=0.9962;a[343]=11.4301;a[344]=86.0;a[345]=0.0698;a[346]=0.9976;a[347]=14.3007;a[348]=87.0;a[349]=0.0523;a[350]=0.9986;a[351]=19.0811;a[352]=88.0;a[353]=0.0349;a[354]=0.9994;a[355]=28.6363;a[356]=89.0;a[357]=0.0175;a[358]=0.9998;a[359]=57.2900;a[360]=90.0;a[361]=0.0000;a[362]=1.0000;a[363]=16331239353195370.0000;a[364]=91.0;a[365]=-0.0175;a[366]=0.9998;a[367]=-57.2900;a[368]=92.0;a[369]=-0.0349;a[370]=0.9994;a[371]=-28.6363;a[372]=93.0;a[373]=-0.0523;a[374]=0.9986;a[375]=-19.0811;a[376]=94.0;a[377]=-0.0698;a[378]=0.9976;a[379]=-14.3007;a[380]=95.0;a[381]=-0.0872;a[382]=0.9962;a[383]=-11.4301;a[384]=96.0;a[385]=-0.1045;a[386]=0.9945;a[387]=-9.5144;a[388]=97.0;a[389]=-0.1219;a[390]=0.9925;a[391]=-8.1443;a[392]=98.0;a[393]=-0.1392;a[394]=0.9903;a[395]=-7.1154;a[396]=99.0;a[397]=-0.1564;a[398]=0.9877;a[399]=-6.3138;a[400]=100.0;a[401]=-0.1736;a[402]=0.9848;a[403]=-5.6713;
+a[404]=101.0;a[405]=-0.1908;a[406]=0.9816;a[407]=-5.1446;a[408]=102.0;a[409]=-0.2079;a[410]=0.9781;a[411]=-4.7046;a[412]=103.0;a[413]=-0.2250;a[414]=0.9744;a[415]=-4.3315;a[416]=104.0;a[417]=-0.2419;a[418]=0.9703;a[419]=-4.0108;a[420]=105.0;a[421]=-0.2588;a[422]=0.9659;a[423]=-3.7321;a[424]=106.0;a[425]=-0.2756;a[426]=0.9613;a[427]=-3.4874;a[428]=107.0;a[429]=-0.2924;a[430]=0.9563;a[431]=-3.2709;a[432]=108.0;a[433]=-0.3090;a[434]=0.9511;a[435]=-3.0777;a[436]=109.0;a[437]=-0.3256;a[438]=0.9455;a[439]=-2.9042;a[440]=110.0;a[441]=-0.3420;a[442]=0.9397;a[443]=-2.7475;a[444]=111.0;a[445]=-0.3584;a[446]=0.9336;a[447]=-2.6051;a[448]=112.0;a[449]=-0.3746;a[450]=0.9272;a[451]=-2.4751;a[452]=113.0;a[453]=-0.3907;a[454]=0.9205;a[455]=-2.3559;a[456]=114.0;a[457]=-0.4067;a[458]=0.9135;a[459]=-2.2460;a[460]=115.0;a[461]=-0.4226;a[462]=0.9063;a[463]=-2.1445;a[464]=116.0;a[465]=-0.4384;a[466]=0.8988;a[467]=-2.0503;a[468]=117.0;a[469]=-0.4540;a[470]=0.8910;a[471]=-1.9626;a[472]=118.0;a[473]=-0.4695;a[474]=0.8829;a[475]=-1.8807;a[476]=119.0;a[477]=-0.4848;a[478]=0.8746;a[479]=-1.8040;a[480]=120.0;a[481]=-0.5000;a[482]=0.8660;a[483]=-1.7321;a[484]=121.0;a[485]=-0.5150;a[486]=0.8572;a[487]=-1.6643;a[488]=122.0;a[489]=-0.5299;a[490]=0.8480;a[491]=-1.6003;a[492]=123.0;a[493]=-0.5446;a[494]=0.8387;a[495]=-1.5399;a[496]=124.0;a[497]=-0.5592;a[498]=0.8290;a[499]=-1.4826;a[500]=125.0;a[501]=-0.5736;a[502]=0.8192;a[503]=-1.4281;a[504]=126.0;a[505]=-0.5878;a[506]=0.8090;a[507]=-1.3764;a[508]=127.0;a[509]=-0.6018;a[510]=0.7986;a[511]=-1.3270;a[512]=128.0;a[513]=-0.6157;a[514]=0.7880;a[515]=-1.2799;a[516]=129.0;a[517]=-0.6293;a[518]=0.7771;a[519]=-1.2349;a[520]=130.0;a[521]=-0.6428;a[522]=0.7660;a[523]=-1.1918;a[524]=131.0;a[525]=-0.6561;a[526]=0.7547;a[527]=-1.1504;a[528]=132.0;a[529]=-0.6691;a[530]=0.7431;a[531]=-1.1106;a[532]=133.0;a[533]=-0.6820;a[534]=0.7314;a[535]=-1.0724;a[536]=134.0;a[537]=-0.6947;a[538]=0.7193;a[539]=-1.0355;a[540]=135.0;a[541]=-0.7071;a[542]=0.7071;a[543]=-1.0000;a[544]=136.0;a[545]=-0.7193;a[546]=0.6947;a[547]=-0.9657;a[548]=137.0;a[549]=-0.7314;a[550]=0.6820;a[551]=-0.9325;a[552]=138.0;a[553]=-0.7431;a[554]=0.6691;a[555]=-0.9004;a[556]=139.0;a[557]=-0.7547;a[558]=0.6561;a[559]=-0.8693;a[560]=140.0;a[561]=-0.7660;a[562]=0.6428;a[563]=-0.8391;a[564]=141.0;a[565]=-0.7771;a[566]=0.6293;a[567]=-0.8098;a[568]=142.0;a[569]=-0.7880;a[570]=0.6157;a[571]=-0.7813;a[572]=143.0;a[573]=-0.7986;a[574]=0.6018;a[575]=-0.7536;a[576]=144.0;a[577]=-0.8090;a[578]=0.5878;a[579]=-0.7265;a[580]=145.0;a[581]=-0.8192;a[582]=0.5736;a[583]=-0.7002;a[584]=146.0;a[585]=-0.8290;a[586]=0.5592;a[587]=-0.6745;a[588]=147.0;a[589]=-0.8387;a[590]=0.5446;a[591]=-0.6494;a[592]=148.0;a[593]=-0.8480;a[594]=0.5299;a[595]=-0.6249;a[596]=149.0;a[597]=-0.8572;a[598]=0.5150;a[599]=-0.6009;a[600]=150.0;a[601]=-0.8660;a[602]=0.5000;a[603]=-0.5774;a[604]=151.0;a[605]=-0.8746;a[606]=0.4848;a[607]=-0.5543;a[608]=152.0;a[609]=-0.8829;a[610]=0.4695;a[611]=-0.5317;a[612]=153.0;a[613]=-0.8910;a[614]=0.4540;a[615]=-0.5095;a[616]=154.0;a[617]=-0.8988;a[618]=0.4384;a[619]=-0.4877;a[620]=155.0;a[621]=-0.9063;a[622]=0.4226;a[623]=-0.4663;a[624]=156.0;a[625]=-0.9135;a[626]=0.4067;a[627]=-0.4452;a[628]=157.0;a[629]=-0.9205;a[630]=0.3907;a[631]=-0.4245;a[632]=158.0;a[633]=-0.9272;a[634]=0.3746;a[635]=-0.4040;a[636]=159.0;a[637]=-0.9336;a[638]=0.3584;a[639]=-0.3839;a[640]=160.0;a[641]=-0.9397;a[642]=0.3420;a[643]=-0.3640;a[644]=161.0;a[645]=-0.9455;a[646]=0.3256;a[647]=-0.3443;a[648]=162.0;a[649]=-0.9511;a[650]=0.3090;a[651]=-0.3249;a[652]=163.0;a[653]=-0.9563;a[654]=0.2924;a[655]=-0.3057;a[656]=164.0;a[657]=-0.9613;a[658]=0.2756;a[659]=-0.2867;a[660]=165.0;a[661]=-0.9659;a[662]=0.2588;a[663]=-0.2679;a[664]=166.0;a[665]=-0.9703;a[666]=0.2419;a[667]=-0.2493;a[668]=167.0;a[669]=-0.9744;a[670]=0.2250;a[671]=-0.2309;a[672]=168.0;a[673]=-0.9781;a[674]=0.2079;a[675]=-0.2126;a[676]=169.0;a[677]=-0.9816;a[678]=0.1908;a[679]=-0.1944;a[680]=170.0;a[681]=-0.9848;a[682]=0.1736;a[683]=-0.1763;a[684]=171.0;a[685]=-0.9877;a[686]=0.1564;a[687]=-0.1584;a[688]=172.0;a[689]=-0.9903;a[690]=0.1392;a[691]=-0.1405;a[692]=173.0;a[693]=-0.9925;a[694]=0.1219;a[695]=-0.1228;a[696]=174.0;a[697]=-0.9945;a[698]=0.1045;a[699]=-0.1051;a[700]=175.0;a[701]=-0.9962;a[702]=0.0872;a[703]=-0.0875;a[704]=176.0;a[705]=-0.9976;a[706]=0.0698;a[707]=-0.0699;a[708]=177.0;a[709]=-0.9986;a[710]=0.0523;a[711]=-0.0524;a[712]=178.0;a[713]=-0.9994;a[714]=0.0349;a[715]=-0.0349;a[716]=179.0;a[717]=-0.9998;a[718]=0.0175;a[719]=-0.0175;a[720]=180.0;a[721]=-1.0000;a[722]=0.0000;a[723]=0.0000;a[724]=181.0;a[725]=-0.9998;a[726]=-0.0175;a[727]=0.0175;a[728]=182.0;a[729]=-0.9994;a[730]=-0.0349;a[731]=0.0349;a[732]=183.0;a[733]=-0.9986;a[734]=-0.0523;a[735]=0.0524;a[736]=184.0;a[737]=-0.9976;a[738]=-0.0698;a[739]=0.0699;a[740]=185.0;a[741]=-0.9962;a[742]=-0.0872;a[743]=0.0875;a[744]=186.0;a[745]=-0.9945;a[746]=-0.1045;a[747]=0.1051;a[748]=187.0;a[749]=-0.9925;a[750]=-0.1219;a[751]=0.1228;a[752]=188.0;a[753]=-0.9903;a[754]=-0.1392;a[755]=0.1405;a[756]=189.0;a[757]=-0.9877;a[758]=-0.1564;a[759]=0.1584;a[760]=190.0;a[761]=-0.9848;a[762]=-0.1736;a[763]=0.1763;a[764]=191.0;a[765]=-0.9816;a[766]=-0.1908;a[767]=0.1944;a[768]=192.0;a[769]=-0.9781;a[770]=-0.2079;a[771]=0.2126;a[772]=193.0;a[773]=-0.9744;a[774]=-0.2250;a[775]=0.2309;a[776]=194.0;a[777]=-0.9703;a[778]=-0.2419;a[779]=0.2493;a[780]=195.0;a[781]=-0.9659;a[782]=-0.2588;a[783]=0.2679;a[784]=196.0;a[785]=-0.9613;a[786]=-0.2756;a[787]=0.2867;a[788]=197.0;a[789]=-0.9563;a[790]=-0.2924;a[791]=0.3057;a[792]=198.0;a[793]=-0.9511;a[794]=-0.3090;a[795]=0.3249;a[796]=199.0;a[797]=-0.9455;a[798]=-0.3256;a[799]=0.3443;a[800]=200.0;a[801]=-0.9397;a[802]=-0.3420;a[803]=0.3640;
+a[804]=201.0;a[805]=-0.9336;a[806]=-0.3584;a[807]=0.3839;a[808]=202.0;a[809]=-0.9272;a[810]=-0.3746;a[811]=0.4040;a[812]=203.0;a[813]=-0.9205;a[814]=-0.3907;a[815]=0.4245;a[816]=204.0;a[817]=-0.9135;a[818]=-0.4067;a[819]=0.4452;a[820]=205.0;a[821]=-0.9063;a[822]=-0.4226;a[823]=0.4663;a[824]=206.0;a[825]=-0.8988;a[826]=-0.4384;a[827]=0.4877;a[828]=207.0;a[829]=-0.8910;a[830]=-0.4540;a[831]=0.5095;a[832]=208.0;a[833]=-0.8829;a[834]=-0.4695;a[835]=0.5317;a[836]=209.0;a[837]=-0.8746;a[838]=-0.4848;a[839]=0.5543;a[840]=210.0;a[841]=-0.8660;a[842]=-0.5000;a[843]=0.5774;a[844]=211.0;a[845]=-0.8572;a[846]=-0.5150;a[847]=0.6009;a[848]=212.0;a[849]=-0.8480;a[850]=-0.5299;a[851]=0.6249;a[852]=213.0;a[853]=-0.8387;a[854]=-0.5446;a[855]=0.6494;a[856]=214.0;a[857]=-0.8290;a[858]=-0.5592;a[859]=0.6745;a[860]=215.0;a[861]=-0.8192;a[862]=-0.5736;a[863]=0.7002;a[864]=216.0;a[865]=-0.8090;a[866]=-0.5878;a[867]=0.7265;a[868]=217.0;a[869]=-0.7986;a[870]=-0.6018;a[871]=0.7536;a[872]=218.0;a[873]=-0.7880;a[874]=-0.6157;a[875]=0.7813;a[876]=219.0;a[877]=-0.7771;a[878]=-0.6293;a[879]=0.8098;a[880]=220.0;a[881]=-0.7660;a[882]=-0.6428;a[883]=0.8391;a[884]=221.0;a[885]=-0.7547;a[886]=-0.6561;a[887]=0.8693;a[888]=222.0;a[889]=-0.7431;a[890]=-0.6691;a[891]=0.9004;a[892]=223.0;a[893]=-0.7314;a[894]=-0.6820;a[895]=0.9325;a[896]=224.0;a[897]=-0.7193;a[898]=-0.6947;a[899]=0.9657;a[900]=225.0;a[901]=-0.7071;a[902]=-0.7071;a[903]=1.0000;a[904]=226.0;a[905]=-0.6947;a[906]=-0.7193;a[907]=1.0355;a[908]=227.0;a[909]=-0.6820;a[910]=-0.7314;a[911]=1.0724;a[912]=228.0;a[913]=-0.6691;a[914]=-0.7431;a[915]=1.1106;a[916]=229.0;a[917]=-0.6561;a[918]=-0.7547;a[919]=1.1504;a[920]=230.0;a[921]=-0.6428;a[922]=-0.7660;a[923]=1.1918;a[924]=231.0;a[925]=-0.6293;a[926]=-0.7771;a[927]=1.2349;a[928]=232.0;a[929]=-0.6157;a[930]=-0.7880;a[931]=1.2799;a[932]=233.0;a[933]=-0.6018;a[934]=-0.7986;a[935]=1.3270;a[936]=234.0;a[937]=-0.5878;a[938]=-0.8090;a[939]=1.3764;a[940]=235.0;a[941]=-0.5736;a[942]=-0.8192;a[943]=1.4281;a[944]=236.0;a[945]=-0.5592;a[946]=-0.8290;a[947]=1.4826;a[948]=237.0;a[949]=-0.5446;a[950]=-0.8387;a[951]=1.5399;a[952]=238.0;a[953]=-0.5299;a[954]=-0.8480;a[955]=1.6003;a[956]=239.0;a[957]=-0.5150;a[958]=-0.8572;a[959]=1.6643;a[960]=240.0;a[961]=-0.5000;a[962]=-0.8660;a[963]=1.7321;a[964]=241.0;a[965]=-0.4848;a[966]=-0.8746;a[967]=1.8040;a[968]=242.0;a[969]=-0.4695;a[970]=-0.8829;a[971]=1.8807;a[972]=243.0;a[973]=-0.4540;a[974]=-0.8910;a[975]=1.9626;a[976]=244.0;a[977]=-0.4384;a[978]=-0.8988;a[979]=2.0503;a[980]=245.0;a[981]=-0.4226;a[982]=-0.9063;a[983]=2.1445;a[984]=246.0;a[985]=-0.4067;a[986]=-0.9135;a[987]=2.2460;a[988]=247.0;a[989]=-0.3907;a[990]=-0.9205;a[991]=2.3559;a[992]=248.0;a[993]=-0.3746;a[994]=-0.9272;a[995]=2.4751;a[996]=249.0;a[997]=-0.3584;a[998]=-0.9336;a[999]=2.6051;a[1000]=250.0;a[1001]=-0.3420;a[1002]=-0.9397;a[1003]=2.7475;a[1004]=251.0;a[1005]=-0.3256;a[1006]=-0.9455;a[1007]=2.9042;a[1008]=252.0;a[1009]=-0.3090;a[1010]=-0.9511;a[1011]=3.0777;a[1012]=253.0;a[1013]=-0.2924;a[1014]=-0.9563;a[1015]=3.2709;a[1016]=254.0;a[1017]=-0.2756;a[1018]=-0.9613;a[1019]=3.4874;a[1020]=255.0;a[1021]=-0.2588;a[1022]=-0.9659;a[1023]=3.7321;a[1024]=256.0;a[1025]=-0.2419;a[1026]=-0.9703;a[1027]=4.0108;a[1028]=257.0;a[1029]=-0.2250;a[1030]=-0.9744;a[1031]=4.3315;a[1032]=258.0;a[1033]=-0.2079;a[1034]=-0.9781;a[1035]=4.7046;a[1036]=259.0;a[1037]=-0.1908;a[1038]=-0.9816;a[1039]=5.1446;a[1040]=260.0;a[1041]=-0.1736;a[1042]=-0.9848;a[1043]=5.6713;a[1044]=261.0;a[1045]=-0.1564;a[1046]=-0.9877;a[1047]=6.3138;a[1048]=262.0;a[1049]=-0.1392;a[1050]=-0.9903;a[1051]=7.1154;a[1052]=263.0;a[1053]=-0.1219;a[1054]=-0.9925;a[1055]=8.1443;a[1056]=264.0;a[1057]=-0.1045;a[1058]=-0.9945;a[1059]=9.5144;a[1060]=265.0;a[1061]=-0.0872;a[1062]=-0.9962;a[1063]=11.4301;a[1064]=266.0;a[1065]=-0.0698;a[1066]=-0.9976;a[1067]=14.3007;a[1068]=267.0;a[1069]=-0.0523;a[1070]=-0.9986;a[1071]=19.0811;a[1072]=268.0;a[1073]=-0.0349;a[1074]=-0.9994;a[1075]=28.6363;a[1076]=269.0;a[1077]=-0.0175;a[1078]=-0.9998;a[1079]=57.2900;a[1080]=270.0;a[1081]=0.0000;a[1082]=-1.0000;a[1083]=5443746451065123.0000;a[1084]=271.0;a[1085]=0.0175;a[1086]=-0.9998;a[1087]=-57.2900;a[1088]=272.0;a[1089]=0.0349;a[1090]=-0.9994;a[1091]=-28.6363;a[1092]=273.0;a[1093]=0.0523;a[1094]=-0.9986;a[1095]=-19.0811;a[1096]=274.0;a[1097]=0.0698;a[1098]=-0.9976;a[1099]=-14.3007;a[1100]=275.0;a[1101]=0.0872;a[1102]=-0.9962;a[1103]=-11.4301;a[1104]=276.0;a[1105]=0.1045;a[1106]=-0.9945;a[1107]=-9.5144;a[1108]=277.0;a[1109]=0.1219;a[1110]=-0.9925;a[1111]=-8.1443;a[1112]=278.0;a[1113]=0.1392;a[1114]=-0.9903;a[1115]=-7.1154;a[1116]=279.0;a[1117]=0.1564;a[1118]=-0.9877;a[1119]=-6.3138;a[1120]=280.0;a[1121]=0.1736;a[1122]=-0.9848;a[1123]=-5.6713;a[1124]=281.0;a[1125]=0.1908;a[1126]=-0.9816;a[1127]=-5.1446;a[1128]=282.0;a[1129]=0.2079;a[1130]=-0.9781;a[1131]=-4.7046;a[1132]=283.0;a[1133]=0.2250;a[1134]=-0.9744;a[1135]=-4.3315;a[1136]=284.0;a[1137]=0.2419;a[1138]=-0.9703;a[1139]=-4.0108;a[1140]=285.0;a[1141]=0.2588;a[1142]=-0.9659;a[1143]=-3.7321;a[1144]=286.0;a[1145]=0.2756;a[1146]=-0.9613;a[1147]=-3.4874;a[1148]=287.0;a[1149]=0.2924;a[1150]=-0.9563;a[1151]=-3.2709;a[1152]=288.0;a[1153]=0.3090;a[1154]=-0.9511;a[1155]=-3.0777;a[1156]=289.0;a[1157]=0.3256;a[1158]=-0.9455;a[1159]=-2.9042;a[1160]=290.0;a[1161]=0.3420;a[1162]=-0.9397;a[1163]=-2.7475;a[1164]=291.0;a[1165]=0.3584;a[1166]=-0.9336;a[1167]=-2.6051;a[1168]=292.0;a[1169]=0.3746;a[1170]=-0.9272;a[1171]=-2.4751;a[1172]=293.0;a[1173]=0.3907;a[1174]=-0.9205;a[1175]=-2.3559;a[1176]=294.0;a[1177]=0.4067;a[1178]=-0.9135;a[1179]=-2.2460;a[1180]=295.0;a[1181]=0.4226;a[1182]=-0.9063;a[1183]=-2.1445;a[1184]=296.0;a[1185]=0.4384;a[1186]=-0.8988;a[1187]=-2.0503;a[1188]=297.0;a[1189]=0.4540;a[1190]=-0.8910;a[1191]=-1.9626;a[1192]=298.0;a[1193]=0.4695;a[1194]=-0.8829;a[1195]=-1.8807;a[1196]=299.0;a[1197]=0.4848;a[1198]=-0.8746;a[1199]=-1.8040;a[1200]=300.0;a[1201]=0.5000;a[1202]=-0.8660;a[1203]=-1.7321;
+a[1204]=301.0;a[1205]=0.5150;a[1206]=-0.8572;a[1207]=-1.6643;a[1208]=302.0;a[1209]=0.5299;a[1210]=-0.8480;a[1211]=-1.6003;a[1212]=303.0;a[1213]=0.5446;a[1214]=-0.8387;a[1215]=-1.5399;a[1216]=304.0;a[1217]=0.5592;a[1218]=-0.8290;a[1219]=-1.4826;a[1220]=305.0;a[1221]=0.5736;a[1222]=-0.8192;a[1223]=-1.4281;a[1224]=306.0;a[1225]=0.5878;a[1226]=-0.8090;a[1227]=-1.3764;a[1228]=307.0;a[1229]=0.6018;a[1230]=-0.7986;a[1231]=-1.3270;a[1232]=308.0;a[1233]=0.6157;a[1234]=-0.7880;a[1235]=-1.2799;a[1236]=309.0;a[1237]=0.6293;a[1238]=-0.7771;a[1239]=-1.2349;a[1240]=310.0;a[1241]=0.6428;a[1242]=-0.7660;a[1243]=-1.1918;a[1244]=311.0;a[1245]=0.6561;a[1246]=-0.7547;a[1247]=-1.1504;a[1248]=312.0;a[1249]=0.6691;a[1250]=-0.7431;a[1251]=-1.1106;a[1252]=313.0;a[1253]=0.6820;a[1254]=-0.7314;a[1255]=-1.0724;a[1256]=314.0;a[1257]=0.6947;a[1258]=-0.7193;a[1259]=-1.0355;a[1260]=315.0;a[1261]=0.7071;a[1262]=-0.7071;a[1263]=-1.0000;a[1264]=316.0;a[1265]=0.7193;a[1266]=-0.6947;a[1267]=-0.9657;a[1268]=317.0;a[1269]=0.7314;a[1270]=-0.6820;a[1271]=-0.9325;a[1272]=318.0;a[1273]=0.7431;a[1274]=-0.6691;a[1275]=-0.9004;a[1276]=319.0;a[1277]=0.7547;a[1278]=-0.6561;a[1279]=-0.8693;a[1280]=320.0;a[1281]=0.7660;a[1282]=-0.6428;a[1283]=-0.8391;a[1284]=321.0;a[1285]=0.7771;a[1286]=-0.6293;a[1287]=-0.8098;a[1288]=322.0;a[1289]=0.7880;a[1290]=-0.6157;a[1291]=-0.7813;a[1292]=323.0;a[1293]=0.7986;a[1294]=-0.6018;a[1295]=-0.7536;a[1296]=324.0;a[1297]=0.8090;a[1298]=-0.5878;a[1299]=-0.7265;a[1300]=325.0;a[1301]=0.8192;a[1302]=-0.5736;a[1303]=-0.7002;a[1304]=326.0;a[1305]=0.8290;a[1306]=-0.5592;a[1307]=-0.6745;a[1308]=327.0;a[1309]=0.8387;a[1310]=-0.5446;a[1311]=-0.6494;a[1312]=328.0;a[1313]=0.8480;a[1314]=-0.5299;a[1315]=-0.6249;a[1316]=329.0;a[1317]=0.8572;a[1318]=-0.5150;a[1319]=-0.6009;a[1320]=330.0;a[1321]=0.8660;a[1322]=-0.5000;a[1323]=-0.5774;a[1324]=331.0;a[1325]=0.8746;a[1326]=-0.4848;a[1327]=-0.5543;a[1328]=332.0;a[1329]=0.8829;a[1330]=-0.4695;a[1331]=-0.5317;a[1332]=333.0;a[1333]=0.8910;a[1334]=-0.4540;a[1335]=-0.5095;a[1336]=334.0;a[1337]=0.8988;a[1338]=-0.4384;a[1339]=-0.4877;a[1340]=335.0;a[1341]=0.9063;a[1342]=-0.4226;a[1343]=-0.4663;a[1344]=336.0;a[1345]=0.9135;a[1346]=-0.4067;a[1347]=-0.4452;a[1348]=337.0;a[1349]=0.9205;a[1350]=-0.3907;a[1351]=-0.4245;a[1352]=338.0;a[1353]=0.9272;a[1354]=-0.3746;a[1355]=-0.4040;a[1356]=339.0;a[1357]=0.9336;a[1358]=-0.3584;a[1359]=-0.3839;a[1360]=340.0;a[1361]=0.9397;a[1362]=-0.3420;a[1363]=-0.3640;a[1364]=341.0;a[1365]=0.9455;a[1366]=-0.3256;a[1367]=-0.3443;a[1368]=342.0;a[1369]=0.9511;a[1370]=-0.3090;a[1371]=-0.3249;a[1372]=343.0;a[1373]=0.9563;a[1374]=-0.2924;a[1375]=-0.3057;a[1376]=344.0;a[1377]=0.9613;a[1378]=-0.2756;a[1379]=-0.2867;a[1380]=345.0;a[1381]=0.9659;a[1382]=-0.2588;a[1383]=-0.2679;a[1384]=346.0;a[1385]=0.9703;a[1386]=-0.2419;a[1387]=-0.2493;a[1388]=347.0;a[1389]=0.9744;a[1390]=-0.2250;a[1391]=-0.2309;a[1392]=348.0;a[1393]=0.9781;a[1394]=-0.2079;a[1395]=-0.2126;a[1396]=349.0;a[1397]=0.9816;a[1398]=-0.1908;a[1399]=-0.1944;a[1400]=350.0;a[1401]=0.9848;a[1402]=-0.1736;a[1403]=-0.1763;a[1404]=351.0;a[1405]=0.9877;a[1406]=-0.1564;a[1407]=-0.1584;a[1408]=352.0;a[1409]=0.9903;a[1410]=-0.1392;a[1411]=-0.1405;a[1412]=353.0;a[1413]=0.9925;a[1414]=-0.1219;a[1415]=-0.1228;a[1416]=354.0;a[1417]=0.9945;a[1418]=-0.1045;a[1419]=-0.1051;a[1420]=355.0;a[1421]=0.9962;a[1422]=-0.0872;a[1423]=-0.0875;a[1424]=356.0;a[1425]=0.9976;a[1426]=-0.0698;a[1427]=-0.0699;a[1428]=357.0;a[1429]=0.9986;a[1430]=-0.0523;a[1431]=-0.0524;a[1432]=358.0;a[1433]=0.9994;a[1434]=-0.0349;a[1435]=-0.0349;a[1436]=359.0;a[1437]=0.9998;a[1438]=-0.0175;a[1439]=-0.0175;a[1440]=360.0;a[1441]=1.0000;a[1442]=0.0000;a[1443]=0.0000;
+
+		rx = rloc[4*(rindex-1)+1];
+		ry = rloc[4*(rindex-1)+2];
+		rdir = rloc[4*(rindex-1)+3];
+		
+		int angleRobot = getAngleFromDir(rdir);	
+		int half_fov = round((double)fov/2.0);
+		int angleMin = angleRobot - half_fov;
+		int angleMax = angleRobot + half_fov;
+		int inc = angleMin < angleMax ? ANGLE_INC:-ANGLE_INC;
+				
+	  	int beams = round( abs(angleMax - angleMin) / ANGLE_INC );
+	  	double step = 0.8;
+
+		int ai,ai_n,x,y;
+		double range,cosa,sina;
+		// Iterate over each angle
+		for (i=0,ai=angleMin; i < beams; i+=1, ai+=inc) {
+			ai_n = ai % 360;
+			if (ai_n<0) ai_n+=360;
+			cosa = a[4*ai_n+1];
+			sina = a[4*ai_n+2];
+			
+			// Initialize the range for this angle to the maximum range
+			range = INFINITY;				
+
+			// Iterate over each step along the current ray
+			for (double d = step; d < max_distance; d += step) {
+				// Calculate the current position along the ray
+				x = (int)(rx + d * cosa);
+				y = (int)(ry + d * sina);
+				// Check if the current position is within the grid
+				if (self.isInside(x,y)){  
+					if(map[x][y]) {
+						// Update the range for this angle
+						range = d;	//edistance(rx,ry,x,y)?
+						// Store the range for this angle in the ranges array
+						int code = xy2idx(x,y);
+						//only add new obstacles
+						if (scandata[0]==0 || (scandata[0]>0 && scandata[scandata[0]]!=code) ){
+							scandata[0]++;
+							scandata[scandata[0]] = code;
+							angles[0]++;
+							angles[angles[0]] = ai_n;
+						}
+						break;	//take only first block, do not see after it
+					}
+				} else {	
+					break;		
+				}
+			}
+			//set range for this angle
+ 			
+ 			//ranges[0]++;
+  			//ranges[ranges[0]]=range;
+ 		}
+		robot.onLaserScan(scandata, angles) deadline(rate+5);	
+		scanObstacles(robot,rindex,rate,fov,max_distance) after(rate);
+	}
+	
+	//convert a point(x,y) in robot's coordinates to map coordinates. The robot is at (a,b) in map.
+	double[2] robot2map(double x, double y, double a, double b, int dir){
+		dir = dir % 8;
+		if (dir<0) dir+=8;
+		
+		double[8] sins = {0.,SIN45,1.,SIN45,0.,-SIN45,-1.,-SIN45};
+		double[8] coss = {1.,COS45,0.,-COS45,-1.,-COS45,0.,COS45};		
+
+		double[2] p;
+		p[0] = x*coss[dir] - y*sins[dir] + a;
+		p[1] = x*sins[dir] + y*coss[dir] + b;
+		
+		return p;
+	}	
+	
+	double[2] map2robot(double x, double y, double a, double b, int dir){
+		dir = dir % 8;
+		if (dir<0) dir+=8;
+			
+		//use ENV for these constant arrays will cause the model not compilable, don't know the reason
+		double[8] sins = {0.,SIN45,1.,SIN45,0.,-SIN45,-1.,-SIN45};
+		double[8] coss = {1.,COS45,0.,-COS45,-1.,-COS45,0.,COS45};		
+
+		double[2] p;
+		x-=a; y-=b;
+		p[0] = (x*coss[dir] + y*sins[dir]);
+		p[1] = (-x*sins[dir] + y*coss[dir]);
+		
+		return p;
+	}	
+	
+	boolean isInsideRect(double[4] r,double x, double y){
+		return x>r[0] && x<r[1] && y>r[2] && y<r[3];
+	}
+	
+	boolean isRectIntersect(double[4] rr1, double[4] rr2){
+		if (isInsideRect(rr1,rr2[0],rr2[2]) ||
+			isInsideRect(rr1,rr2[1],rr2[2]) ||
+			isInsideRect(rr1,rr2[0],rr2[3]) ||
+			isInsideRect(rr1,rr2[1],rr2[3])
+		) return true;
+			
+		if (isInsideRect(rr2,rr1[0],rr1[2]) ||
+			isInsideRect(rr2,rr1[1],rr1[2]) ||
+			isInsideRect(rr2,rr1[0],rr1[3]) ||
+			isInsideRect(rr2,rr1[1],rr1[3])
+		) return true;
+			
+		return false;
+	}
+	
+	//a robot calls this msgsrv to tell the map server to keep track of its new location
+	@priority(5)
+	msgsrv updateRobotLocation(int idx, int rx, int ry, int rdir,int velocity){
+		int i = (idx-1)*4;
+		
+		rloc[i+1] = rx;
+		rloc[i+2] = ry;
+		rloc[i+3] = rdir;
+		rloc[i+4] = velocity;
+		
+		//collision check
+		double xmax = ROBOT_LENGTH/2 + COLLISION_MARGIN;
+		double ymax = ROBOT_WIDTH/2 + COLLISION_MARGIN;
+		
+		double a = (rx+0.5) * MAP_RESOL;
+		double b = (ry+0.5) * MAP_RESOL;
+		
+		double[2] p1,p2,p3,p4;
+		p1 = robot2map(xmax,ymax,a,b,rdir);
+		p2 = robot2map(-xmax,-ymax,a,b,rdir);
+		
+		double[4] rr1,rr2;
+		
+		rr1[0] = min(p1[0],p2[0]); rr1[1] = max(p1[0],p2[0]); 
+		rr1[2] = min(p1[1],p2[1]); rr1[3] = max(p1[1],p2[1]); 
+		
+		//double min_dist = 2*COLLISION_RADIUS + COLLISION_MARGIN;
+		//min_dist *= min_dist;
+				
+		for(i=1;i<=rloc[0];i++){
+			if (i!=idx){
+				int dir = rloc[4*(i-1)+3];
+				a = (rloc[4*(i-1)+1] + 0.5) * MAP_RESOL;
+				b = (rloc[4*(i-1)+2] + 0.5) * MAP_RESOL;
+				p1 = robot2map(xmax,ymax,a,b,dir);
+				p2 = robot2map(-xmax,-ymax,a,b,dir);
+				rr2[0] = min(p1[0],p2[0]); rr2[1] = max(p1[0],p2[0]); 
+				rr2[2] = min(p1[1],p2[1]); rr2[3] = max(p1[1],p2[1]); 			
+				boolean collided = isRectIntersect(rr1,rr2);
+			/*
+				int dx = rx-rloc[4*(i-1)+1];
+				int dy = ry-rloc[4*(i-1)+2];
+				double d = dx*dx + dy*dy;//to avoid using sqrt()
+				d*=MAP_RESOL;
+				d*=MAP_RESOL;
+				boolean collided = d < min_dist;
+			*/
+				assertion(!collided, "Collision with another robot");
+			}
+		}
+	}
+	
+	//encode two integers (-999 to 999) into one integer 
+	//e.g: 23-->1023, -23->2023, code2 = code_y * 10000 + code_x
+	//(3,-200) --> 1003*10000 + 2200 = 10032200
+	int xy2idx(int ox,int oy){
+		int x,sx,y,sy;	
+		if (ox<0){
+			sx=2;x=-ox;
+		}else{
+			sx=1;x=ox;		
+		}
+		if (oy<0){
+			sy=2;y=-oy;
+		}else{
+			sy=1;y=oy;		
+		}
+		int ex = sx*1000 + x;
+		int ey = sy*1000 + y;
+		int idx = ey*10000 + ex;
+		return idx;
+	}
+	
+	//decode
+	int[2] idx2xy(int idx){
+		int ex = idx % 10000;
+		int ey = (idx - ex) / 10000;
+		int sx = (int)(ex/1000);
+		int x = ex % 1000;
+		int sy = (int)(ey/1000);
+		int y = ey % 1000;
+		if (sx==2) x=-x;
+		if (sy==2) y=-y;
+		int[2] ret;ret[0]=x;ret[1]=y;
+		return ret;
+	}
+	
+	boolean[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/] expandObstacles(boolean[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/] map){
+		boolean[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/] map2;
+		int[8][2] neighbors = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+		for(int i=0;i<MAP_HEIGHT;i++){
+			for(int j=0;j<MAP_WIDTH;j++){
+				map2[i][j] = map[i][j];
+				if (map[i][j]) {
+					for(int k=0;k<8;k++){
+						int nx = i+neighbors[k][0];
+						int ny = j+neighbors[k][1];
+						if (isInside(nx,ny) && !map[nx][ny]) 
+							map2[nx][ny]=true;
+					}
+				}
+			}
+		}
+		return map2;
+	}
+	
+	int[2] getNeighborAtDir(int x, int y, int dir){
+		//neighboring cells in 8 directions: e, ne, n, nw, w, sw, s, se
+		int[8][2] nxt = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+		dir%=8;
+		if (dir<0)dir+=8;
+		int[2] p ;
+		p[0] = x + nxt[dir][0];
+		p[1] = y + nxt[dir][1];
+		return p;	
+	}
+	
+	int[8][2] getNeighbors(int x, int y){
+		//neighboring cells in 8 directions: e, ne, n, nw, w, sw, s, se
+		int[8][2] nxt = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+		int[8][2] p ;
+		for(int i=0;i<8;i++){
+			p[i][0] = x + nxt[i][0];
+			p[i][1] = y + nxt[i][1];
+		}
+		return p;	
+	}
+	
+	//generate a path from (x,y) to (targetX,targetY) using a selected algorithm
+	@priority(3)
+	msgsrv generatePath(Node robot,int robot_index,int startX, int startY, int targetX, int targetY){		
+		//prepare occupancy grid with static obstacles and mobile obstacles
+		
+		//neighboring cells in 8 directions: e, ne, n, nw, w, sw, s, se
+		int[8][2] nxt = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
+			
+		int i,j;		
+		boolean[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/] map;
+		for(i=0;i<MAP_WIDTH;i++)for(j=0;j<MAP_HEIGHT;j++)map[i][j]=false;		
+map[8][18]=true;map[8][19]=true;map[8][20]=true;map[8][21]=true;map[8][22]=true;map[9][18]=true;map[9][19]=true;map[9][20]=true;map[9][21]=true;map[9][22]=true;map[10][18]=true;map[10][19]=true;map[10][20]=true;map[10][21]=true;map[10][22]=true;map[11][18]=true;map[11][19]=true;map[11][20]=true;map[11][21]=true;map[11][22]=true;map[12][18]=true;map[12][19]=true;map[12][20]=true;map[12][21]=true;map[12][22]=true;map[13][18]=true;map[13][19]=true;map[13][20]=true;map[13][21]=true;map[13][22]=true;map[14][18]=true;map[14][19]=true;map[14][20]=true;map[14][21]=true;map[14][22]=true;map[15][18]=true;map[15][19]=true;map[15][20]=true;map[15][21]=true;map[15][22]=true;map[16][18]=true;map[16][19]=true;map[16][20]=true;map[16][21]=true;map[16][22]=true;map[17][18]=true;map[17][19]=true;map[17][20]=true;map[17][21]=true;map[17][22]=true;map[18][18]=true;map[18][19]=true;map[18][20]=true;map[18][21]=true;map[18][22]=true;map[19][18]=true;map[19][19]=true;map[19][20]=true;map[19][21]=true;map[19][22]=true;map[20][18]=true;map[20][19]=true;map[20][20]=true;map[20][21]=true;map[20][22]=true;map[21][18]=true;map[21][19]=true;map[21][20]=true;map[21][21]=true;map[21][22]=true;map[22][18]=true;map[22][19]=true;map[22][20]=true;map[22][21]=true;map[22][22]=true;map[23][18]=true;map[23][19]=true;map[23][20]=true;map[23][21]=true;map[23][22]=true;map[24][18]=true;map[24][19]=true;map[24][20]=true;map[24][21]=true;map[24][22]=true;map[25][18]=true;map[25][19]=true;map[25][20]=true;map[25][21]=true;map[25][22]=true;map[26][19]=true;map[26][20]=true;map[26][21]=true;map[30][33]=true;map[30][34]=true;map[30][35]=true;map[30][36]=true;map[30][37]=true;map[30][38]=true;map[30][39]=true;map[30][40]=true;map[30][41]=true;map[31][33]=true;map[31][34]=true;map[31][35]=true;map[31][36]=true;map[31][37]=true;map[31][38]=true;map[31][39]=true;map[31][40]=true;map[31][41]=true;map[32][33]=true;map[32][34]=true;map[32][35]=true;map[32][36]=true;map[32][37]=true;map[32][38]=true;map[32][39]=true;map[32][40]=true;map[32][41]=true;map[33][4]=true;map[33][5]=true;map[33][6]=true;map[33][7]=true;map[33][8]=true;map[33][9]=true;map[33][10]=true;map[33][33]=true;map[33][34]=true;map[33][35]=true;map[33][36]=true;map[33][37]=true;map[33][38]=true;map[33][39]=true;map[33][40]=true;map[33][41]=true;map[34][4]=true;map[34][5]=true;map[34][6]=true;map[34][7]=true;map[34][8]=true;map[34][9]=true;map[34][10]=true;map[34][11]=true;map[34][33]=true;map[34][34]=true;map[34][35]=true;map[34][36]=true;map[34][37]=true;map[34][38]=true;map[34][39]=true;map[34][40]=true;map[34][41]=true;map[35][4]=true;map[35][5]=true;map[35][6]=true;map[35][7]=true;map[35][8]=true;map[35][9]=true;map[35][10]=true;map[35][11]=true;map[36][4]=true;map[36][5]=true;map[36][6]=true;map[36][7]=true;map[36][8]=true;map[36][9]=true;map[36][10]=true;map[36][11]=true;map[37][4]=true;map[37][5]=true;map[37][6]=true;map[37][7]=true;map[37][8]=true;map[37][9]=true;map[37][10]=true;map[37][11]=true;map[37][23]=true;map[37][24]=true;map[38][4]=true;map[38][5]=true;map[38][6]=true;map[38][7]=true;map[38][8]=true;map[38][9]=true;map[38][10]=true;map[38][11]=true;map[38][22]=true;map[38][23]=true;map[38][24]=true;map[38][25]=true;map[39][21]=true;map[39][22]=true;map[39][23]=true;map[39][24]=true;map[39][25]=true;map[39][26]=true;map[40][21]=true;map[40][22]=true;map[40][23]=true;map[40][24]=true;map[40][25]=true;map[40][26]=true;map[41][21]=true;map[41][22]=true;map[41][23]=true;map[41][24]=true;map[41][25]=true;map[41][26]=true;map[42][22]=true;map[42][23]=true;map[42][24]=true;map[42][25]=true;
+
+		boolean[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/] omap;
+		for(i=0;i<MAP_HEIGHT;i++)for(j=0;j<MAP_WIDTH;j++) omap[i][j]=map[i][j];	
+		
+		//expand obstacles by 1 cell around it to avoid collision
+		map = expandObstacles(map);
+		//expand more if required
+		int max_expands = round( (SAFE_MARGIN + ROBOT_WIDTH/2.0) / MAP_RESOL );			
+		for(i=1;i<max_expands;i++){	
+			map = expandObstacles(map);
+		}
+				
+		int min_gap = round((ROBOT_WIDTH + 2*SAFE_MARGIN) / MAP_RESOL);
+				
+		for (i=0;i<rloc[0];i++){
+			if ((i+1)==robot_index) continue;
+			int rx=rloc[4*i+1];
+			int ry=rloc[4*i+2];
+			if (isInside(rx,ry)) map[rx][ry]=true;
+			/*
+			int[8][2] ns = getNeighbors(rx,ry);
+			for(int ii=0;ii<8;ii++){
+				if (isInside(ns[i][0],ns[i][1])) map[ns[i][0]][ns[i][1]]=true;
+			}				
+			*/
+			 //block narrow gap between robot and borders if there is
+		    int gapleft = ry;
+		    int gapright = MAP_WIDTH - ry;
+		    int gaptop = rx;
+		    int gapbottom = MAP_HEIGHT - rx;
+		    
+		    if (gapleft<min_gap) for(int y=0;y<ry;y++) map[rx][y]=true;
+		    else if (gapright<min_gap) for(int y=ry+1;y<MAP_WIDTH;y++) map[rx][y]=true;
+		    
+		    if (gaptop<min_gap) for(int x=0;x<rx;x++) map[x][ry]=true;
+		    else if (gapbottom<min_gap) for(int x=rx+1;x<MAP_HEIGHT;x++) map[x][ry]=true;	
+			
+			//if robot is moving, mark next cells in its moving direction as occupied (in the future)
+			int rdir = rloc[4*i+3];
+			int rspeed = rloc[4*i+4];
+			if (rspeed != 0){
+				int stop_cells = round(0.2*rspeed);//cells that it can move in 200 miliseconds
+				//int stop_cells = 2;
+				if (stop_cells < 2) stop_cells = 2;
+				for (j=1;j<=stop_cells;j++){
+					int[2] p = {rx + j*nxt[rdir][0], ry + j*nxt[rdir][1]};
+					//getNeighborAtDir(rx,ry,rdir);
+					if (isInside(p[0],p[1])) {
+						map[p[0]][p[1]]=true;						
+					} else {
+						break;
+					}
+					//rx = p[0]; ry=p[1];
+				}
+			}
+		}
+		
+		//make sure the expanded cells do not cover the robot that requests the path
+		int[8][2] neighbors = getNeighbors(startX,startY);
+		for(i=0;i<8;i++){
+			if (isInside(neighbors[i][0],neighbors[i][1]) && !omap[neighbors[i][0]][neighbors[i][1]]) map[neighbors[i][0]][neighbors[i][1]]=false;
+		}
+		
+		//regenerate path, try to find a new one by blocking the old direction
+		/*
+		for(i=0;i<3;i++){
+			int blockdir = blockdirs[i];
+			if (blockdir>=0 && blockdir<8){
+				int[2] np = getNeighborAtDir(startX,startY,blockdir);
+				if (isInside(np[0],np[1])) map[np[0]][np[1]]=true; //else break;
+			}
+		}
+		*/
+		int k,lk,li,lj;
+		
+		int[512] open; open[0]=0;
+		
+		double[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/][5] nodes;
+		
+		for(i=0;i<MAP_HEIGHT;i++){
+			for(j=0;j<MAP_WIDTH;j++){
+				nodes[i][j][0]=0;	//unchecked
+				nodes[i][j][1]=INFINITY;	//g_score = distance to starting point
+				nodes[i][j][2]=INFINITY;	//h_score = distance to ending point, f_score = g_score + h_score
+				nodes[i][j][3]=-1;	//preceding cell that leads to this cell
+				nodes[i][j][4]=-1;
+			}
+		}
+		//add starting point
+		open[0]=1;
+		open[1]=xy2idx(startX,startY);
+		
+		nodes[startX][startY][0]=1;
+		nodes[startX][startY][1]=0;//g_score
+		nodes[startX][startY][2]=odistance(startX,startY,targetX,targetY);//h_score
+						
+		boolean found=false;
+		while (true){
+			double lf=INFINITY;
+			lk=-1; li=-1; lj=-1;
+			for(k=1;k<=open[0];k++){
+				if (open[k]>=0){
+					int[2] ij = idx2xy(open[k]);
+					i = ij[0];
+					j = ij[1];
+					if (i>=0 && j>=0 && (nodes[i][j][1] + nodes[i][j][2]) < lf){
+							lf=nodes[i][j][1] + nodes[i][j][2];
+							li=i;lj=j;lk=k;	
+					}
+				}
+			}
+			if (li<0 || lj<0) {
+				found = false;
+				break;
+			}
+			nodes[li][lj][0]=2;//visisted
+			
+			if (li==targetX && lj==targetY){
+				//found path
+				found = true;
+				break;
+			}
+			
+			//remove from open list		
+			//open = removeFromList(open,lk); this function is not used because Rebeca has error in passing parameters of large array type 			
+			int[512] topen; //copy array
+			for(i=0;i<512;i++) { topen[i]=open[i]; open[i]=0; }				
+			//open[0]=0;
+			if (topen[0]>0 && lk>=1 && lk<=topen[0]){
+				open[0]=topen[0]-1;
+				for(i=1;i<lk;i++){
+					open[i]=topen[i];
+				}
+				for(i=lk;i<topen[0];i++){
+					open[i]=topen[i+1];
+				}
+			}
+			
+			for(k=0;k<7;k++){
+				int nx = li + nxt[k][0];
+				int ny = lj + nxt[k][1];
+				if (isInside(nx,ny)){
+					if (0==nodes[nx][ny][0] && false==map[nx][ny]){					
+						double g = nodes[li][lj][1] + ((nx==li||ny==lj)?1:SQRT2);
+						if (g < nodes[nx][ny][1]){
+							nodes[nx][ny][0] = 1;
+							nodes[nx][ny][1] = g;
+							nodes[nx][ny][2] = odistance(nx,ny,targetX,targetY);	
+							nodes[nx][ny][3] = li;
+							nodes[nx][ny][4] = lj;		
+							
+							boolean added = false;
+							int code = xy2idx(nx,ny);
+							for(i=1;i<=open[0];i++) if (open[i]==code) {added=true;break;}
+							if (!added){
+								open[0]++;
+								open[open[0]]=code;
+							}
+						}
+					}
+				}
+			}
+		}
+		
+		int[101/*BUFFER_SIZE*/] path, rpath;
+		for(i=0;i<BUFFER_SIZE;i++){ path[i]=0; rpath[i]=0; }
+		
+		if (found){
+			//construct the path based on traceback graph 
+			i=targetX;j=targetY;
+			rpath[0]=1;
+			rpath[1]=xy2idx(targetX,targetY);
+			while(true){
+				li=(int)nodes[i][j][3];
+				lj=(int)nodes[i][j][4];
+				if (li>=0 && lj>=0){
+					rpath[0]++;
+					rpath[rpath[0]] = xy2idx(li,lj);
+				} else {
+					break;
+				}
+				i = li; j=lj;
+			}
+			//get it in reversed order
+			path[0]=0;
+			for(i=rpath[0];i>0;i--){
+				path[0]++;
+				path[path[0]]=rpath[i];
+			}
+			assertion(path[1]==xy2idx(startX,startY) && path[path[0]] == xy2idx(targetX,targetY),"Incorrect path");
+			
+			//combine points of same direction or ziczac points
+			
+			//use rpath as a buffer
+			for(i=0;i<BUFFER_SIZE;i++){ rpath[i]=0;}
+						
+			int prevx = startX, prevy = startY, prevdir = 9999, removex=-1, removey=-1;
+			for(i=2;i<=path[0];i++){
+				int[2] node = idx2xy(path[i]);
+				int dx = node[0] - prevx;
+				int dy = node[1] - prevy;
+				int dir = 0;
+				if (dx==0) dir = dy>0?2:6;
+				else if (dy==0) dir = dx>0?0:4;
+				else if (dx*dy>0) dir = dx>0?1:5;
+				else dir = dx<0?3:7;
+				if (COMBINE_ZICZAC){
+					if (i>2 && i<path[0]){
+						int[2] node1 = idx2xy(path[i-1]);
+						int[2] node2 = idx2xy(path[i+1]);
+						if (!(removex==node1[0] && removey==node1[1])){
+						if ( mdistance(node[0],node[1],node1[0],node1[1])==1 
+							&& 
+							 mdistance(node[0],node[1],node2[0],node2[1])==1)
+							{ 
+							//TODO: do not skip point if it is to avoid a corner of an obstacle
+							prevx = node[0]; prevy=node[1];
+							removex = node[0]; removey=node[1];
+							//keep orientation of previous node (node1)
+							//prevdir=dir;
+							continue;
+							}
+						}
+					}
+				}
+				rpath[0]++;
+				rpath[rpath[0]] = path[i];
+				prevx = node[0]; prevy = node[1]; prevdir = dir;
+			}
+			//copy rpath to path
+			for(i=0;i<BUFFER_SIZE;i++){ path[i]=rpath[i]; }
+		} else {
+			//assertion(false,"Path not found");				
+		}
+		
+		robot.onNewPath(path);
+	}
+	
+}
+
+main {
+
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.5,1500,false);
+	@priority(5) Node r2(theMap):(2,5,15,45,35,2,0.7,2000,false);
+	@priority(6) Node r3(theMap):(3,5,25,45,25,2,0.8,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.5,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.3,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+	
+
+//working case: stop zone=0.3, scan rate=100
+/*
+	//14746 states, 33367 transitions
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.6,1500,false);
+	@priority(6) Node r2(theMap):(2,5,15,45,35,2,0.7,2000,false);
+	@priority(5) Node r3(theMap):(3,5,25,45,25,2,0.7,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.7,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.4,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+	
+	//14784 states, 33405 transitions
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.5,1500,false);
+	@priority(6) Node r2(theMap):(2,5,15,45,35,2,0.9,2000,false);
+	@priority(5) Node r3(theMap):(3,5,25,45,25,2,0.6,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.7,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.4,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);
+*/
+/*
+	//20554 states, 46868 transitions
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.3,1500,false);
+	@priority(6) Node r2(theMap):(2,5,15,45,35,2,0.3,2000,false);
+	@priority(5) Node r3(theMap):(3,5,25,45,25,2,0.3,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.3,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.7,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+*/
+/*
+	//15747 states, 35642 transitions
+	@priority(2) Node r1(theMap):(1,5,5,45,45,2,0.4,1500,false);
+	@priority(3) Node r2(theMap):(2,5,15,45,35,2,0.5,2000,false);
+	@priority(4) Node r3(theMap):(3,5,25,45,25,2,0.7,2500,false);
+	@priority(5) Node r4(theMap):(4,5,35,45,15,2,0.8,3000,false);
+	@priority(6) Node r5(theMap):(5,5,45,45,5,2,0.9,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+	
+*/
+/*
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.6,1500,false);
+	@priority(6) Node r2(theMap):(2,5,15,45,35,2,0.7,2000,false);
+	@priority(5) Node r3(theMap):(3,5,25,45,25,2,0.7,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.7,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.4,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+*/
+//non-working case: stop zone=0.3, scan rate=100, multiple executions in program
+/*
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.5,1500,false);
+	@priority(6) Node r2(theMap):(2,5,15,45,35,2,0.5,1500,false);
+	@priority(5) Node r3(theMap):(3,5,25,45,25,2,0.5,1500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.5,1500,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.5,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+*/
+/*
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.9,1500,false);
+	@priority(6) Node r2(theMap):(2,5,15,45,35,2,0.8,2000,false);
+	@priority(5) Node r3(theMap):(3,5,25,45,25,2,0.7,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.6,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,1.0,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+*/	
+	//non-working case: stop zone=0.3, scan rate=140
+/*	
+	@priority(2) Node r1(theMap):(1,5,5,45,45,2,1.0,1500,false);
+	@priority(3) Node r2(theMap):(2,5,15,45,35,2,1.0,1500,false);
+	@priority(4) Node r3(theMap):(3,5,25,45,25,2,1.0,1500,false);
+	@priority(5) Node r4(theMap):(4,5,35,45,15,2,1.0,1500,false);
+	@priority(6) Node r5(theMap):(5,5,45,45,5,2,1.0,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);
+*/
+}

@@ -1,0 +1,24 @@
+property{
+	define {
+		onTarget1 = r1.distance2target <=r1.target_tolerance; //r1.rx==r1.targetX && r1.ry==r1.targetY;
+		done1 = r1.moves[0]>0 && r1.moves[0]-r1.moveidx<=r1.target_tolerance;
+		
+		onTarget2 = r2.distance2target <=r2.target_tolerance; //r2.rx==r2.targetX && r2.ry==r2.targetY;
+		done2 = r2.moves[0]>0 && r2.moves[0]-r2.moveidx<=r2.target_tolerance;		
+		
+		onTarget3 = r3.distance2target <=r3.target_tolerance; //r3.rx==r3.targetX && r3.ry==r3.targetY;
+		done3 = r3.moves[0]>0 && r3.moves[0]-r3.moveidx<=r3.target_tolerance;				
+
+		onTarget4 = r4.distance2target <=r4.target_tolerance; //r4.rx==r4.targetX && r4.ry==r4.targetY;
+		done4 = r4.moves[0]>0 && r4.moves[0]-r4.moveidx<=r4.target_tolerance;				
+
+		onTarget5 = r5.distance2target <=r5.target_tolerance; //r5.rx==r5.targetX && r5.ry==r5.targetY;
+		done5 = r5.moves[0]>0 && r5.moves[0]-r5.moveidx<=r5.target_tolerance;		
+	}
+	
+	Assertion{
+		reached_all: 
+		  (!(done1 && onTarget1) || !(done2 && onTarget2) || !(done3 && onTarget3) || !(done4 && onTarget4) || !(done5 && onTarget5)) 
+		^ ((done1 && onTarget1) && (done2 && onTarget2) && (done3 && onTarget3) && (done4 && onTarget4) && (done5 && onTarget5));		
+	}
+}
