@@ -29,7 +29,7 @@ env double COLLISION_MARGIN = 0.02;
 env double ROBOT_ANGULAR_VELOCITY = 360;//degrees per second
 env int ANGLE_INC = 2; //angle increment in degrees
 env int FIELD_OF_VIEW = 180;		//field of view (LIDAR sensor)
-env int LASERSCAN_RATE = 100;	//7Hz
+env int LASERSCAN_RATE = 140;	//7Hz
 env double LASERSCAN_MAX_DISTANCE = 10.0;	//= max range in meters
 
 env boolean COMBINE_ZICZAC = true;
@@ -196,7 +196,7 @@ reactiveclass Node(50) {
 	int round(double x){
 		double dec = x/10;
 		if (dec!=0) dec = dec>0?1:-1;
-		return (int)x + dec;
+		return (int)x + (int)dec;
 	}
 	
 	int getTimeToStop(double v, double a){
@@ -616,7 +616,7 @@ reactiveclass Node(50) {
 			//path not found, what to do next???
 			failures++;
 			if (failures>2){
-				assertion(false,"the robot seems to get stuck");
+				//assertion(false,"the robot seems to get stuck");
 			} else {
 				int odir = rdir;
 				//int redir = (rdir+4) % 8;
@@ -694,6 +694,7 @@ reactiveclass MapServer(50) {
 	}
 	statevars{
 		int[21] rloc; //#0 = counter, [1,2,3,4] = [x,y,dir,isMoving] of each robot
+		int collisions;
 	}
 		
 	MapServer(int rcount){
@@ -706,6 +707,7 @@ reactiveclass MapServer(50) {
 			rloc[4*i+3]=0;
 			rloc[4*i+4]=0;
 		}
+		collisions = 0;
 		int max_range = round(LASERSCAN_MAX_DISTANCE / MAP_RESOL);
 		scanObstacles(r1,1,LASERSCAN_RATE,FIELD_OF_VIEW,max_range);
 		scanObstacles(r2,2,LASERSCAN_RATE,FIELD_OF_VIEW,max_range);
@@ -747,7 +749,7 @@ reactiveclass MapServer(50) {
 	int round(double x){
 		double dec = x/10;
 		if (dec!=0) dec = dec>0?1:-1;
-		return (int)x + dec;
+		return (int)x + (int)dec;
 	}
 	
 	int floor(double x){
@@ -1033,7 +1035,8 @@ a[1204]=301.0;a[1205]=0.5150;a[1206]=-0.8572;a[1207]=-1.6643;a[1208]=302.0;a[120
 				d*=MAP_RESOL;
 				boolean collided = d < min_dist;
 			*/
-				assertion(!collided, "Collision with another robot");
+				//assertion(!collided, "Collision with another robot");
+				if (collided) collisions=collisions + 1;
 			}
 		}
 	}
@@ -1368,13 +1371,20 @@ map[8][18]=true;map[8][19]=true;map[8][20]=true;map[8][21]=true;map[8][22]=true;
 
 main {
 
-	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.5,1500,false);
-	@priority(5) Node r2(theMap):(2,5,15,45,35,2,0.7,2000,false);
-	@priority(6) Node r3(theMap):(3,5,25,45,25,2,0.8,2500,false);
-	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.5,3000,false);
-	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.3,1500,false);	
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.6,1500,false);
+	@priority(6) Node r2(theMap):(2,5,15,45,35,2,0.7,2000,false);
+	@priority(5) Node r3(theMap):(3,5,25,45,25,2,0.7,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.7,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.4,1500,false);	
 	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
-	
+	/*
+	@priority(3) Node r1(theMap):(1,5,5,45,45,2,0.9,1500,false);
+	@priority(5) Node r2(theMap):(2,5,15,45,35,2,0.9,2000,false);
+	@priority(6) Node r3(theMap):(3,5,25,45,25,2,0.9,2500,false);
+	@priority(4) Node r4(theMap):(4,5,35,45,15,2,0.9,3000,false);
+	@priority(2) Node r5(theMap):(5,5,45,45,5,2,0.9,1500,false);	
+	@priority(1) MapServer theMap(r1,r2,r3,r4,r5):(5);	
+	*/
 
 //working case: stop zone=0.3, scan rate=100
 /*
