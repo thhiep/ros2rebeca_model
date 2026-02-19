@@ -14,14 +14,16 @@ property{
 		
 		done5 = (r5.distance2target <=r5.target_tolerance) 
 			&& (r5.moves[0]==0 || (r5.moves[0]>0 && r5.moves[0]-r5.moveidx<=r5.target_tolerance));
-															
+
+		allDone = done1 && done2 && done3 && done4 && done5;
+
 		noCollisions = theMap.collisions==0;
 		
 		noLivelock = r1.failures<=2 && r2.failures<=2 && r3.failures<=2 && r4.failures<=2 && r5.failures<=2;		
 	}
 	
 	Assertion{
-		live: !(done1 && done2 && done3 && done4 && done5) ^ (done1 && done2 && done3 && done4 && done5);
+		live: !allDone ^ allDone;
 		collisionFree: noCollisions;
 		liveLockFree: noLivelock;
 	}
