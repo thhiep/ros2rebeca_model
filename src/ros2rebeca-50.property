@@ -1,0 +1,183 @@
+property{
+	define {
+		done1 = (r1.distance2target <=r1.target_tolerance) 
+			&& (r1.moves[0]==0 || (r1.moves[0]>0 && r1.moves[0]-r1.moveidx<=r1.target_tolerance));
+		
+		done2 = (r2.distance2target <=r2.target_tolerance) 
+			&& (r2.moves[0]==0 || (r2.moves[0]>0 && r2.moves[0]-r2.moveidx<=r2.target_tolerance));
+		
+		done3 = (r3.distance2target <=r3.target_tolerance) 
+			&& (r3.moves[0]==0 || (r3.moves[0]>0 && r3.moves[0]-r3.moveidx<=r3.target_tolerance));
+		
+		done4 = (r4.distance2target <=r4.target_tolerance) 
+			&& (r4.moves[0]==0 || (r4.moves[0]>0 && r4.moves[0]-r4.moveidx<=r4.target_tolerance));
+		
+		done5 = (r5.distance2target <=r5.target_tolerance) 
+			&& (r5.moves[0]==0 || (r5.moves[0]>0 && r5.moves[0]-r5.moveidx<=r5.target_tolerance));
+			
+		done6 = (r6.distance2target <=r6.target_tolerance) 
+			&& (r6.moves[0]==0 || (r6.moves[0]>0 && r6.moves[0]-r6.moveidx<=r6.target_tolerance));
+		
+		done7 = (r7.distance2target <=r7.target_tolerance) 
+			&& (r7.moves[0]==0 || (r7.moves[0]>0 && r7.moves[0]-r7.moveidx<=r7.target_tolerance));
+		
+		done8 = (r8.distance2target <=r8.target_tolerance) 
+			&& (r8.moves[0]==0 || (r8.moves[0]>0 && r8.moves[0]-r8.moveidx<=r8.target_tolerance));
+		
+		done9 = (r9.distance2target <=r9.target_tolerance) 
+			&& (r9.moves[0]==0 || (r9.moves[0]>0 && r9.moves[0]-r9.moveidx<=r9.target_tolerance));
+		
+		done10 = (r10.distance2target <=r10.target_tolerance) 
+			&& (r10.moves[0]==0 || (r10.moves[0]>0 && r10.moves[0]-r10.moveidx<=r10.target_tolerance));
+															
+		done11 = (r11.distance2target <=r11.target_tolerance) 
+			&& (r11.moves[0]==0 || (r11.moves[0]>0 && r11.moves[0]-r11.moveidx<=r11.target_tolerance));
+		
+		done12 = (r12.distance2target <=r12.target_tolerance) 
+			&& (r12.moves[0]==0 || (r12.moves[0]>0 && r12.moves[0]-r12.moveidx<=r12.target_tolerance));
+		
+		done13 = (r13.distance2target <=r13.target_tolerance) 
+			&& (r13.moves[0]==0 || (r13.moves[0]>0 && r13.moves[0]-r13.moveidx<=r13.target_tolerance));
+		
+		done14 = (r14.distance2target <=r14.target_tolerance) 
+			&& (r14.moves[0]==0 || (r14.moves[0]>0 && r14.moves[0]-r14.moveidx<=r14.target_tolerance));
+		
+		done15 = (r15.distance2target <=r15.target_tolerance) 
+			&& (r15.moves[0]==0 || (r15.moves[0]>0 && r15.moves[0]-r15.moveidx<=r15.target_tolerance));
+			
+		done16 = (r16.distance2target <=r16.target_tolerance) 
+			&& (r16.moves[0]==0 || (r16.moves[0]>0 && r16.moves[0]-r16.moveidx<=r16.target_tolerance));
+		
+		done17 = (r17.distance2target <=r17.target_tolerance) 
+			&& (r17.moves[0]==0 || (r17.moves[0]>0 && r17.moves[0]-r17.moveidx<=r17.target_tolerance));
+		
+		done18 = (r18.distance2target <=r18.target_tolerance) 
+			&& (r18.moves[0]==0 || (r18.moves[0]>0 && r18.moves[0]-r18.moveidx<=r18.target_tolerance));
+		
+		done19 = (r19.distance2target <=r19.target_tolerance) 
+			&& (r19.moves[0]==0 || (r19.moves[0]>0 && r19.moves[0]-r19.moveidx<=r19.target_tolerance));
+		
+		done20 = (r20.distance2target <=r20.target_tolerance) 
+			&& (r20.moves[0]==0 || (r20.moves[0]>0 && r20.moves[0]-r20.moveidx<=r20.target_tolerance));
+			
+		done21 = (r21.distance2target <=r21.target_tolerance) 
+			&& (r21.moves[0]==0 || (r21.moves[0]>0 && r21.moves[0]-r21.moveidx<=r21.target_tolerance));
+		
+		done22 = (r22.distance2target <=r22.target_tolerance) 
+			&& (r22.moves[0]==0 || (r22.moves[0]>0 && r22.moves[0]-r22.moveidx<=r22.target_tolerance));
+		
+		done23 = (r23.distance2target <=r23.target_tolerance) 
+			&& (r23.moves[0]==0 || (r23.moves[0]>0 && r23.moves[0]-r23.moveidx<=r23.target_tolerance));
+		
+		done24 = (r24.distance2target <=r24.target_tolerance) 
+			&& (r24.moves[0]==0 || (r24.moves[0]>0 && r24.moves[0]-r24.moveidx<=r24.target_tolerance));
+		
+		done25 = (r25.distance2target <=r25.target_tolerance) 
+			&& (r25.moves[0]==0 || (r25.moves[0]>0 && r25.moves[0]-r25.moveidx<=r25.target_tolerance));
+			
+		done26 = (r26.distance2target <=r26.target_tolerance) 
+			&& (r26.moves[0]==0 || (r26.moves[0]>0 && r26.moves[0]-r26.moveidx<=r26.target_tolerance));
+		
+		done27 = (r27.distance2target <=r27.target_tolerance) 
+			&& (r27.moves[0]==0 || (r27.moves[0]>0 && r27.moves[0]-r27.moveidx<=r27.target_tolerance));
+		
+		done28 = (r28.distance2target <=r28.target_tolerance) 
+			&& (r28.moves[0]==0 || (r28.moves[0]>0 && r28.moves[0]-r28.moveidx<=r28.target_tolerance));
+		
+		done29 = (r29.distance2target <=r29.target_tolerance) 
+			&& (r29.moves[0]==0 || (r29.moves[0]>0 && r29.moves[0]-r29.moveidx<=r29.target_tolerance));
+			
+		done30 = (r30.distance2target <=r30.target_tolerance) 
+			&& (r30.moves[0]==0 || (r30.moves[0]>0 && r30.moves[0]-r30.moveidx<=r30.target_tolerance));
+		
+		done31 = (r31.distance2target <=r31.target_tolerance) 
+			&& (r31.moves[0]==0 || (r31.moves[0]>0 && r31.moves[0]-r31.moveidx<=r31.target_tolerance));
+		
+		done32 = (r32.distance2target <=r32.target_tolerance) 
+			&& (r32.moves[0]==0 || (r32.moves[0]>0 && r32.moves[0]-r32.moveidx<=r32.target_tolerance));
+		
+		done33 = (r33.distance2target <=r33.target_tolerance) 
+			&& (r33.moves[0]==0 || (r33.moves[0]>0 && r3.moves[0]-r33.moveidx<=r33.target_tolerance));
+		
+		done34 = (r34.distance2target <=r34.target_tolerance) 
+			&& (r34.moves[0]==0 || (r34.moves[0]>0 && r34.moves[0]-r34.moveidx<=r34.target_tolerance));
+		
+		done35 = (r35.distance2target <=r35.target_tolerance) 
+			&& (r35.moves[0]==0 || (r35.moves[0]>0 && r35.moves[0]-r35.moveidx<=r35.target_tolerance));
+			
+		done36 = (r36.distance2target <=r36.target_tolerance) 
+			&& (r36.moves[0]==0 || (r36.moves[0]>0 && r36.moves[0]-r36.moveidx<=r36.target_tolerance));
+		
+		done37 = (r37.distance2target <=r37.target_tolerance) 
+			&& (r37.moves[0]==0 || (r37.moves[0]>0 && r37.moves[0]-r37.moveidx<=r37.target_tolerance));
+		
+		done38 = (r38.distance2target <=r38.target_tolerance) 
+			&& (r38.moves[0]==0 || (r38.moves[0]>0 && r38.moves[0]-r38.moveidx<=r38.target_tolerance));
+		
+		done39 = (r39.distance2target <=r39.target_tolerance) 
+			&& (r39.moves[0]==0 || (r39.moves[0]>0 && r39.moves[0]-r39.moveidx<=r39.target_tolerance));
+		
+		done40 = (r40.distance2target <=r40.target_tolerance) 
+			&& (r40.moves[0]==0 || (r40.moves[0]>0 && r40.moves[0]-r40.moveidx<=r40.target_tolerance));
+			
+		done41 = (r41.distance2target <=r41.target_tolerance) 
+			&& (r41.moves[0]==0 || (r41.moves[0]>0 && r41.moves[0]-r41.moveidx<=r41.target_tolerance));
+		
+		done42 = (r42.distance2target <=r42.target_tolerance) 
+			&& (r42.moves[0]==0 || (r42.moves[0]>0 && r42.moves[0]-r42.moveidx<=r42.target_tolerance));
+		
+		done43 = (r43.distance2target <=r43.target_tolerance) 
+			&& (r43.moves[0]==0 || (r43.moves[0]>0 && r43.moves[0]-r43.moveidx<=r43.target_tolerance));
+		
+		done44 = (r44.distance2target <=r44.target_tolerance) 
+			&& (r44.moves[0]==0 || (r44.moves[0]>0 && r44.moves[0]-r44.moveidx<=r44.target_tolerance));
+		
+		done45 = (r45.distance2target <=r45.target_tolerance) 
+			&& (r45.moves[0]==0 || (r45.moves[0]>0 && r45.moves[0]-r45.moveidx<=r45.target_tolerance));
+			
+		done46 = (r46.distance2target <=r46.target_tolerance) 
+			&& (r46.moves[0]==0 || (r46.moves[0]>0 && r46.moves[0]-r46.moveidx<=r46.target_tolerance));
+		
+		done47 = (r47.distance2target <=r47.target_tolerance) 
+			&& (r47.moves[0]==0 || (r47.moves[0]>0 && r47.moves[0]-r47.moveidx<=r47.target_tolerance));
+		
+		done48 = (r48.distance2target <=r48.target_tolerance) 
+			&& (r48.moves[0]==0 || (r48.moves[0]>0 && r48.moves[0]-r48.moveidx<=r48.target_tolerance));
+		
+		done49 = (r49.distance2target <=r49.target_tolerance) 
+			&& (r49.moves[0]==0 || (r49.moves[0]>0 && r49.moves[0]-r49.moveidx<=r49.target_tolerance));
+		
+		done50 = (r50.distance2target <=r50.target_tolerance) 
+			&& (r50.moves[0]==0 || (r50.moves[0]>0 && r50.moves[0]-r50.moveidx<=r50.target_tolerance));
+			
+		allDone = true 
+			&& done1 && done2 && done3 && done4 && done5 && done6 && done7 && done8 && done9 
+			&& done10 && done11 && done12 && done13 && done14 && done15 && done16 && done17 && done18 && done19 
+			&& done20 && done21 && done22 && done23 && done24 && done25 && done26 && done27 && done28 && done29 
+			&& done30 && done31 && done32 && done33 && done34 && done35 && done36 && done37 && done38 && done39 
+			&& done40 && done41 && done42 && done43 && done44 && done45 && done46 && done47 && done48 && done49 
+			&& done50
+			; 
+																		
+		noCollisions = theMap.collisions==0;
+		
+		noLivelock = true
+		&& r1.failures<=2 && r2.failures<=2 && r3.failures<=2 && r4.failures<=2 && r5.failures<=2
+		&& r6.failures<=2 && r7.failures<=2 && r8.failures<=2 && r9.failures<=2 && r10.failures<=2
+		&& r11.failures<=12 && r12.failures<=2 && r13.failures<=2 && r14.failures<=2 && r15.failures<=2
+		&& r16.failures<=2 && r17.failures<=2 && r18.failures<=2 && r19.failures<=2 && r20.failures<=2
+		&& r21.failures<=2 && r22.failures<=2 && r23.failures<=2 && r24.failures<=2 && r25.failures<=2
+		&& r26.failures<=2 && r27.failures<=2 && r28.failures<=2 && r29.failures<=2 && r30.failures<=2
+		&& r31.failures<=2 && r32.failures<=2 && r33.failures<=2 && r34.failures<=2 && r35.failures<=2
+		&& r36.failures<=2 && r37.failures<=2 && r38.failures<=2 && r39.failures<=2 && r40.failures<=2
+		&& r41.failures<=2 && r42.failures<=2 && r43.failures<=2 && r44.failures<=2 && r45.failures<=2
+		&& r46.failures<=2 && r47.failures<=2 && r48.failures<=2 && r49.failures<=2 && r50.failures<=2		
+		;		
+	}
+	
+	Assertion{
+		live: !allDone ^ allDone;
+		collisionFree: noCollisions;
+		liveLockFree: noLivelock;
+	}
+}
