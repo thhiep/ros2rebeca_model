@@ -150,14 +150,7 @@ property{
 		done50 = (r50.distance2target <=r50.target_tolerance) 
 			&& (r50.moves[0]==0 || (r50.moves[0]>0 && r50.moves[0]-r50.moveidx<=r50.target_tolerance));
 			
-		allDone = true 
-			&& done1 && done2 && done3 && done4 && done5 && done6 && done7 && done8 && done9 
-			&& done10 && done11 && done12 && done13 && done14 && done15 && done16 && done17 && done18 && done19 
-			&& done20 && done21 && done22 && done23 && done24 && done25 && done26 && done27 && done28 && done29 
-			&& done30 && done31 && done32 && done33 && done34 && done35 && done36 && done37 && done38 && done39 
-			&& done40 && done41 && done42 && done43 && done44 && done45 && done46 && done47 && done48 && done49 
-			&& done50
-			; 
+		
 																		
 		noCollisions = theMap.collisions==0;
 		
@@ -176,7 +169,19 @@ property{
 	}
 	
 	Assertion{
-		live: !allDone ^ allDone;
+		live: !(true 
+			&& done1 && done2 && done3 && done4 && done5 && done6 && done7 && done8 && done9 
+			&& done10 && done11 && done12 && done13 && done14 && done15 && done16 && done17 && done18 && done19 
+			&& done20 && done21 && done22 && done23 && done24 && done25 && done26 && done27 && done28 && done29 
+			&& done30 && done31 && done32 && done33 && done34 && done35 && done36 && done37 && done38 && done39 
+			&& done40 && done41 && done42 && done43 && done44 && done45 && done46 && done47 && done48 && done49 
+			&& done50) ^ (true 
+			&& done1 && done2 && done3 && done4 && done5 && done6 && done7 && done8 && done9 
+			&& done10 && done11 && done12 && done13 && done14 && done15 && done16 && done17 && done18 && done19 
+			&& done20 && done21 && done22 && done23 && done24 && done25 && done26 && done27 && done28 && done29 
+			&& done30 && done31 && done32 && done33 && done34 && done35 && done36 && done37 && done38 && done39 
+			&& done40 && done41 && done42 && done43 && done44 && done45 && done46 && done47 && done48 && done49 
+			&& done50);
 		collisionFree: noCollisions;
 		liveLockFree: noLivelock;
 	}

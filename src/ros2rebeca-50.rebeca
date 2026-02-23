@@ -62,7 +62,7 @@ env int WCET_SERVICE_DEFAULT = 50;
 env int MAX_ACTIONS = 2;	//buffer size
 env int WCET_ACTION_NAME = 30000;
 
-reactiveclass Node(50) {
+reactiveclass Node(5) {
 	knownrebecs {
 		MapServer theMap;
 	}
@@ -645,7 +645,7 @@ reactiveclass Node(50) {
 	
 }
 
-reactiveclass MapServer(50) {
+reactiveclass MapServer(500) {
 	knownrebecs{
 		Node r1;
 		Node r2;
