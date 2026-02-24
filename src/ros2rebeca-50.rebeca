@@ -62,7 +62,7 @@ env int WCET_SERVICE_DEFAULT = 50;
 env int MAX_ACTIONS = 2;	//buffer size
 env int WCET_ACTION_NAME = 30000;
 
-reactiveclass Node(5) {
+reactiveclass Node(20) {
 	knownrebecs {
 		MapServer theMap;
 	}
@@ -912,9 +912,9 @@ a[1204]=301.0;a[1205]=0.5150;a[1206]=-0.8572;a[1207]=-1.6643;a[1208]=302.0;a[120
 		
 		//prepare scan data here --> list of nearest obstacles around the robot, return (X,Y) coordinates to the robot's axises
 		int[101] scandata;
-		for(i=0;i<101;i++) scandata[i]=0;
+		for(i=0;i<BUFFER_SIZE;i++) scandata[i]=0;
 		int[101] angles;
-		for(i=0;i<101;i++) angles[i]=0;
+		for(i=0;i<BUFFER_SIZE;i++) angles[i]=0;
 		
 //define the occupancy grid
 boolean[100][100] map;
@@ -1270,7 +1270,7 @@ a[1204]=301.0;a[1205]=0.5150;a[1206]=-0.8572;a[1207]=-1.6643;a[1208]=302.0;a[120
 		
 		int[512] open; open[0]=0;
 		
-		double[50/*MAP_HEIGHT*/][50/*MAP_WIDTH*/][5] nodes;
+		double[100/*MAP_HEIGHT*/][100/*MAP_WIDTH*/][5] nodes;
 		
 		for(i=0;i<MAP_HEIGHT;i++){
 			for(j=0;j<MAP_WIDTH;j++){
