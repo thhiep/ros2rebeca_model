@@ -21,7 +21,7 @@ property{
 	}
 	
 	Assertion{
-		live: !(done1 && done2 && done3 && done4 && done5) ^ (done1 && done2 && done3 && done4 && done5);
+		notDone: !(done1 && done2 && done3 && done4 && done5);		
 		collisionFree: noCollisions;
 		liveLockFree: noLivelock;
 	}
